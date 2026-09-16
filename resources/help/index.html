@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>{{helpTitle}}</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: {{width}}px;
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+    color: #f2f4f8;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 背景层：图片 + 模糊 + 暗化遮罩 */
+  .stage {
+    position: relative;
+    padding: 30px;
+    background-image: url("{{bg}}");
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    overflow: hidden;
+  }
+  .stage::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: rgba(8, 10, 15, {{mask}});
+    backdrop-filter: blur({{blur}}px);
+    -webkit-backdrop-filter: blur({{blur}}px);
+  }
+  .inner { position: relative; z-index: 1; }
+
+  /* 顶部标题 */
+  .header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    padding: 4px 6px 18px;
+    border-bottom: 2px solid rgba(255, 255, 255, .18);
+    margin-bottom: 20px;
+  }
+  .title {
+    font-size: 38px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: {{accent}};
+    text-shadow: 0 2px 12px rgba(0, 0, 0, .65);
+  }
+  .subtitle {
+    font-size: 15px;
+    color: rgba(242, 244, 248, .68);
+    letter-spacing: 1px;
+    padding-bottom: 6px;
+  }
+
+  /* 分组卡片 */
+  .card {
+    background: rgba(14, 17, 24, .58);
+    border: 1px solid rgba(255, 255, 255, .12);
+    border-radius: 14px;
+    padding: 16px 20px 18px;
+    margin-bottom: 14px;
+  }
+  .group {
+    font-size: 17px;
+    font-weight: 700;
+    color: {{accent}};
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  .group::before {
+    content: "";
+    width: 4px;
+    height: 17px;
+    border-radius: 2px;
+    background: {{accent}};
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    gap: 14px;
+    align-items: baseline;
+    padding: 7px 0;
+    border-top: 1px dashed rgba(255, 255, 255, .10);
+  }
+  .row:first-of-type { border-top: 0; }
+  .cmd {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 15.5px;
+    color: #8fd0ff;
+    word-break: break-all;
+  }
+  .desc {
+    font-size: 15px;
+    color: rgba(242, 244, 248, .88);
+    line-height: 1.55;
+  }
+
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 18px;
+    padding: 0 6px;
+    font-size: 14px;
+    color: rgba(242, 244, 248, .55);
+    letter-spacing: .5px;
+  }
+  .notice {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(14, 17, 24, .45);
+    border: 1px solid rgba(255, 255, 255, .08);
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: rgba(242, 244, 248, .58);
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="inner">
+    <div class="header">
+      <div class="title">{{helpTitle}}</div>
+      <div class="subtitle">{{helpSubTitle}}</div>
+    </div>
+
+    {{each groups group}}
+    <div class="card">
+      <div class="group">{{group.group}}</div>
+      {{each group.list item}}
+      <div class="row">
+        <div class="cmd">{{item.title}}</div>
+        <div class="desc">{{item.desc}}</div>
+      </div>
+      {{/each}}
+    </div>
+    {{/each}}
+
+    <div class="footer">
+      <span>{{pluginName}}</span>
+      <span>设置面板 → 插件配置 → {{pluginName}}</span>
+    </div>
+    <div class="notice">
+      本项目按 MIT 协议以“现状”开源，不提供任何担保。使用本插件产生的一切后果
+      —— 包括但不限于机器人账号被限制或封禁、机器人发布违法违规内容、聊天数据与
+      API Key 泄露、服务器遭受网络攻击、API 费用损失 —— 均由使用者自行承担，与作者无关。
+      完整免责声明见 DISCLAIMER.md。
+    </div>
+  </div>
+</div>
+</body>
+</html>

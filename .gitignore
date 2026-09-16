@@ -1,0 +1,6 @@
+data/*
+!data/cfg_default.json
+node_modules
+*.log
+Thumbs.db
+desktop.ini
