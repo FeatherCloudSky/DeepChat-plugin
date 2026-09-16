@@ -24,6 +24,19 @@ const PROVIDER_DEFAULT_MODEL = {
   anthropic: 'claude-3-5-sonnet-latest'
 }
 
+/**
+ * 图片细节级别，对应 OpenAI 兼容协议里 image_url.detail。
+ * 留空 = 不发送这个字段（最保险：不是所有兼容服务商都认它）。
+ * 参考 DeepSeek 文档：low 会先把图缩到 512×512 再推理，更快更省 token；
+ * high / original 保留原图；auto 由服务商决定（目前等价 original）。
+ */
+const IMAGE_DETAIL_LEVELS = ['low', 'high', 'original', 'auto']
+
+export function normalizeImageDetail(value) {
+  const level = String(value ?? '').trim().toLowerCase()
+  return IMAGE_DETAIL_LEVELS.includes(level) ? level : ''
+}
+
 function normalizeBase(url) {
   return String(url ?? '').trim().replace(/\/+$/, '')
 }
@@ -113,7 +126,7 @@ function hasContent(content) {
   return String(content ?? '').trim() !== ''
 }
 
-function toOpenAIContent(content) {
+function toOpenAIContent(content, imageDetail) {
   if (!isParts(content)) return content
   return content
     .map((part) => {
@@ -126,7 +139,10 @@ function toOpenAIContent(content) {
           ? `data:${part.mediaType || 'image/jpeg'};base64,${part.data}`
           : part.url
         if (!url) return null
-        return { type: 'image_url', image_url: { url } }
+        const imageUrl = { url }
+        // 只有显式配置了才带 detail —— 有些兼容服务商不认这个字段
+        if (imageDetail) imageUrl.detail = imageDetail
+        return { type: 'image_url', image_url: imageUrl }
       }
       return null
     })
@@ -208,7 +224,7 @@ export function toAnthropicMessages(messages) {
 }
 
 /** 构造请求体，抽成独立函数便于单测 */
-export function buildRequestBody(provider, { model, messages, temperature, maxTokens }) {
+export function buildRequestBody(provider, { model, messages, temperature, maxTokens, imageDetail }) {
   if (provider === 'anthropic') {
     const { system, messages: dialog } = toAnthropicMessages(messages)
     const body = {
@@ -225,7 +241,7 @@ export function buildRequestBody(provider, { model, messages, temperature, maxTo
     model,
     messages: messages.map((message) => ({
       role: message.role,
-      content: toOpenAIContent(message.content)
+      content: toOpenAIContent(message.content, imageDetail)
     })),
     temperature,
     max_tokens: maxTokens,
@@ -315,7 +331,9 @@ async function chat(options = {}) {
     messages: cleanMessages,
     temperature,
     maxTokens,
-    anthropicVersion
+    anthropicVersion,
+    // detail 是 OpenAI 兼容协议里 image_url 的字段，Anthropic 的 image 块没有它
+    imageDetail: provider === 'openai' ? normalizeImageDetail(Cfg.get('imageDetail', '')) : ''
   })
   const headers = buildHeaders(provider, apiKey, anthropicVersion)
 
@@ -369,7 +387,8 @@ export default {
   buildRequestBody,
   buildUrl,
   partsToPlainText,
-  hasContent
+  hasContent,
+  normalizeImageDetail
 }
 
 export { PROVIDER_DEFAULTS, PROVIDER_DEFAULT_MODEL }

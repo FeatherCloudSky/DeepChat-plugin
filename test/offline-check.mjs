@@ -232,6 +232,32 @@ const visionUrl = Provider.buildRequestBody('openai', {
 check('OpenAI 图片：image_url 结构', visionUrl.messages[0].content[1],
   { type: 'image_url', image_url: { url: 'https://example.com/a.png' } })
 
+// 图片细节级别（image_url.detail）
+const imgOnly = (extra = {}) => Provider.buildRequestBody('openai', {
+  model: 'm',
+  messages: [{ role: 'user', content: [{ type: 'image', url: 'https://x/a.png' }] }],
+  temperature: 1,
+  maxTokens: 8,
+  ...extra
+})
+check('细节级别：未配置时不发送该字段', imgOnly().messages[0].content[0].image_url.detail, undefined)
+check('细节级别：low 会被带上', imgOnly({ imageDetail: 'low' }).messages[0].content[0].image_url.detail, 'low')
+check('细节级别：original 会被带上', imgOnly({ imageDetail: 'original' }).messages[0].content[0].image_url.detail, 'original')
+check('细节级别：归一化大小写', Provider.normalizeImageDetail('LOW'), 'low')
+check('细节级别：两侧空格', Provider.normalizeImageDetail('  high  '), 'high')
+check('细节级别：未知值被忽略', Provider.normalizeImageDetail('ultra'), '')
+check('细节级别：空值', Provider.normalizeImageDetail(''), '')
+check('细节级别：null', Provider.normalizeImageDetail(null), '')
+
+const anthropicDetailBody = Provider.buildRequestBody('anthropic', {
+  model: 'm',
+  messages: [{ role: 'user', content: [{ type: 'image', url: 'https://x/a.png' }] }],
+  temperature: 1,
+  maxTokens: 8,
+  imageDetail: 'low'
+})
+checkTrue('Anthropic 请求体里不出现 detail', !JSON.stringify(anthropicDetailBody).includes('detail'))
+
 const visionBase64 = Provider.buildRequestBody('anthropic', {
   model: 'claude-3-5-sonnet-latest',
   messages: [{
@@ -755,6 +781,7 @@ console.log('\n=== 6.5 全链路：一条群消息 → 真实 API → 分条回�
   // ---- 带图片的一轮：验证图片真的被拼成多模态内容 ----
   Cfg.set('imageMaxCount', 3)
   Cfg.set('imageDownload', false)
+  Cfg.set('imageDetail', 'low')
   Cfg.set('modelVision', [{ key: 'e2e-model', vision: true }])
   received.length = 0
 
@@ -772,7 +799,8 @@ console.log('\n=== 6.5 全链路：一条群消息 → 真实 API → 分条回�
     lastContent.some((p) => p.type === 'text' && String(p.text).includes('这是什么')))
   check('图片轮：图片段是 OpenAI 的 image_url 结构',
     JSON.stringify(lastContent.filter((p) => p.type === 'image_url')),
-    JSON.stringify([{ type: 'image_url', image_url: { url: 'https://example.com/card.jpg' } }]))
+    JSON.stringify([{ type: 'image_url', image_url: { url: 'https://example.com/card.jpg', detail: 'low' } }]))
+  Cfg.set('imageDetail', '')
 
   // 模型没开图片能力时，应当降级成 [图片] 文字，而不是把图片塞过去
   Cfg.set('modelVision', [])

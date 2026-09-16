@@ -119,6 +119,21 @@ export function supportGuoba() {
           component: 'Switch'
         },
         {
+          field: 'imageDetail',
+          label: '图片细节级别',
+          bottomHelpMessage: '传给服务商的 image_url.detail。low = 先缩到 512×512 再推理，更快更省 token；original / high = 保留原图；auto = 由服务商决定。留空则不发送这个字段（不是所有兼容服务商都认它，留空最保险）',
+          component: 'Select',
+          componentProps: {
+            options: [
+              { label: '不发送（最保险）', value: '' },
+              { label: 'low — 缩到 512×512，省 token', value: 'low' },
+              { label: 'original — 保留原图', value: 'original' },
+              { label: 'high — 保留原图（兼容写法）', value: 'high' },
+              { label: 'auto — 由服务商决定', value: 'auto' }
+            ]
+          }
+        },
+        {
           field: 'imageHistoryMark',
           label: '历史记录里的图片占位符',
           bottomHelpMessage: '缓存上下文时图片会被替换成这个文字，避免 base64 撑爆缓存',

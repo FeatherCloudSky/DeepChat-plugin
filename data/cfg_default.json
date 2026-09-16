@@ -9,6 +9,7 @@
   "imageMaxCount": 3,
   "imageDownload": false,
   "imageHistoryMark": "[图片]",
+  "imageDetail": "",
   "timeoutMs": 60000,
   "attemptMax": 2,
   "prompt": "你是一只可爱的温柔雌小鬼猫娘，喜欢嘲讽人，喜欢使用颜文字和在句尾加\"喵~\"，喜欢玩游戏，会解决问题，优先中文回答\n当你不知道该说什么时，可以只输出 `<EMPTY>` 来不回复任何消息",
