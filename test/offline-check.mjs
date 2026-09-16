@@ -816,6 +816,56 @@ console.log('\n=== 6.5 全链路：一条群消息 → 真实 API → 分条回�
   checkTrue('未开图片能力时降级为 [图片] 文字', String(fallbackContent).includes('[图片]'))
   checkTrue('未开图片能力时不会带 image_url 段', !JSON.stringify(fallbackContent).includes('image_url'))
 
+  // ---- 引用图片：图片在被引用的那条消息里 ----
+  Cfg.set('imageMaxCount', 3)
+  Cfg.set('modelVision', [{ key: 'e2e-model', vision: true }])
+  received.length = 0
+
+  const quotedEvent = mockEvent({
+    isGroup: true, group_id: 987654, user_id: 666, atme: true,
+    msg: '达达利亚 你认识他是谁吗',
+    // 引用一张图片时，当前消息只有 reply 段，没有 image 段
+    message: [
+      { type: 'reply', id: 'quoted-msg-1' },
+      { type: 'text', text: '达达利亚 你认识他是谁吗' }
+    ],
+    bot: { info: { nickname: '小助手' } },
+    sender: { nickname: '群友', card: '群友甲', role: 'member' },
+    group: {
+      getChatHistory: async () => ([{
+        message_id: 'quoted-msg-1',
+        raw_message: '[图片]',
+        message: [{ type: 'image', url: 'https://example.com/quoted.jpg' }],
+        sender: { nickname: '群友', role: 'member' }
+      }])
+    },
+    friend: { getChatHistory: async () => [] }
+  })
+  await chatInstance.accept(quotedEvent)
+
+  check('引用图片：发出了请求', received.length, 1)
+  const quotedContent = received[0].messages[received[0].messages.length - 1].content
+  checkTrue('引用图片：当前消息没有 image 段时也能拿到图', Array.isArray(quotedContent))
+  check('引用图片：用的是被引用消息里的那张图',
+    JSON.stringify(quotedContent.filter((p) => p.type === 'image_url')),
+    JSON.stringify([{ type: 'image_url', image_url: { url: 'https://example.com/quoted.jpg' } }]))
+
+  // 引用的消息在最近记录里找不到时，不该崩，也不该塞假图片
+  received.length = 0
+  const lostQuoteEvent = mockEvent({
+    isGroup: true, group_id: 987654, user_id: 666, atme: true,
+    msg: '达达利亚 你看这个',
+    message: [{ type: 'reply', id: 'not-in-history' }, { type: 'text', text: '达达利亚 你看这个' }],
+    bot: { info: { nickname: '小助手' } },
+    sender: { nickname: '群友', role: 'member' },
+    group: { getChatHistory: async () => ([]) },
+    friend: { getChatHistory: async () => [] }
+  })
+  await chatInstance.accept(lostQuoteEvent)
+  check('引用找不到时：仍然照常回复文字', received.length, 1)
+  checkTrue('引用找不到时：不会带 image_url',
+    !JSON.stringify(received[0].messages[received[0].messages.length - 1].content).includes('image_url'))
+
   await new Promise((resolve) => server.close(resolve))
   redisStore.clear()
 

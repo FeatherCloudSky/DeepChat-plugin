@@ -110,6 +110,51 @@ function collectImageSegments(e) {
   return images
 }
 
+/**
+ * 这条消息引用了哪条消息（QQ 的「引用回复」）。
+ * 三个来源都试一遍：Yunzai 的 e.reply_id、e.source、以及消息段里的 reply 段。
+ */
+function replyIdOf(e) {
+  if (!e) return ''
+  if (e.reply_id) return String(e.reply_id)
+  if (e.source && e.source.message_id) return String(e.source.message_id)
+  const segments = Array.isArray(e.message) ? e.message : []
+  const replySeg = segments.find((seg) => seg && seg.type === 'reply')
+  return replySeg && replySeg.id ? String(replySeg.id) : ''
+}
+
+/**
+ * 取被引用那条消息里的图片。
+ *
+ * 为什么需要这个：QQ 里「引用一张图片」时，图片本身在【被引用】的消息里，
+ * 当前消息只带一个 reply 段，没有 image 段——所以直接看 e.message 是找不到图的，
+ * 表现就是「机器人看不了引用的图」。
+ *
+ * icqq 没有按 id 取单条消息的接口（Group/Friend 只有 getChatHistory 和 recallMsg），
+ * 所以只能翻最近的聊天记录把它找出来。引用的通常都是刚看过的消息，够用。
+ */
+async function collectQuotedImageSegments(e, max) {
+  const replyId = replyIdOf(e)
+  if (!replyId || max <= 0) return []
+
+  try {
+    const recent = e.isGroup
+      ? await e.group.getChatHistory(0, 30)
+      : await e.friend.getChatHistory(0, 30)
+
+    const quoted = (recent || []).find((msg) => String(msg?.message_id) === replyId)
+    if (!quoted || !Array.isArray(quoted.message)) {
+      logger.info(`[${pluginName}] 引用了 ${replyId}，但最近 30 条里没找到这条消息，取不到引用里的图片`)
+      return []
+    }
+
+    return quoted.message.filter((seg) => seg && seg.type === 'image').slice(0, max)
+  } catch (error) {
+    logger.debug(`[${pluginName}] 读取被引用消息失败：${error.message || error}`)
+    return []
+  }
+}
+
 /** 把文本消息统一成「发送者前缀 + 内容」 */
 function decorateUserText(e, content) {
   const sender = e.sender || {}
@@ -191,7 +236,10 @@ export default class DeepChat extends plugin {
     if (String(e.user_id) === String(e.self_id)) return false
 
     const hasImage = collectImageSegments(e).length > 0
-    if (!msg && !hasImage) return false
+    // 引用消息时，图片在被引用的那条里 —— 当前消息可能既没文字也没图片，
+    // 不能在这里就判死，交给 processChat 去翻。
+    const hasReply = Boolean(replyIdOf(e))
+    if (!msg && !hasImage && !hasReply) return false
 
     if (!Policy.resolveEnabled(e)) return false
 
@@ -213,7 +261,7 @@ export default class DeepChat extends plugin {
       if (!content && Array.isArray(e.message)) {
         content = e.message.filter((seg) => seg.type === 'text').map((seg) => seg.text).join('').trim()
       }
-      if (!content && collectImageSegments(e).length === 0) return false
+      if (!content && collectImageSegments(e).length === 0 && !hasReply) return false
       if (Cfg.getBool('thinking', false)) {
         replyWithRecall(e, e.reply('我正在思考如何回复你，请稍候', true), 30)
       }
@@ -280,6 +328,12 @@ export default class DeepChat extends plugin {
   async processChat(e, content, interactionType = 'active') {
     try {
       const images = await this.buildImageParts(e)
+      const text = String(content ?? '').trim()
+      // 引用了消息，但那条里既没文字也没图片 —— 没什么可回的
+      if (!text && images.length === 0) {
+        logger.info(`[${pluginName}] 消息里既没有文字也没有可用的图片，跳过（${interactionType}）`)
+        return false
+      }
       const { messages, cacheKey } = await this.getContextWithHistory(e, content, interactionType, images)
 
       const request = {
@@ -331,13 +385,25 @@ export default class DeepChat extends plugin {
 
   /** 按当前模型的能力决定要不要把图片带上；不支持时退化成文字标记 */
   async buildImageParts(e) {
-    const segments = collectImageSegments(e)
+    const max = Cfg.getNumber('imageMaxCount', 3, 0, 10)
+    let segments = collectImageSegments(e)
+    let fromQuote = false
+
+    // 当前消息里没有图，但它引用了某条消息 —— 去那条里翻（QQ 引用图片的常见情况）
+    if (segments.length === 0) {
+      const quoted = await collectQuotedImageSegments(e, max)
+      if (quoted.length > 0) {
+        segments = quoted
+        fromQuote = true
+      }
+    }
     if (segments.length === 0) return []
 
     const model = Cfg.get('model', '')
     if (!Cfg.visionFor(model)) {
       logger.info(
-        `[${pluginName}] 这条消息带 ${segments.length} 张图，但模型「${model || '(未配置)'}」没有开启图片输入，` +
+        `[${pluginName}] 这条消息带 ${segments.length} 张图` +
+        `${fromQuote ? '（来自被引用的消息）' : ''}，但模型「${model || '(未配置)'}」没有开启图片输入，` +
         '已降级成 [图片] 文字。可在面板「模型能力 → 逐模型图片能力」里为它打开。'
       )
       return []
@@ -351,7 +417,7 @@ export default class DeepChat extends plugin {
 
     logger.info(
       `[${pluginName}] 图片输入：模型「${model}」已开启图片能力，` +
-      `识别到 ${segments.length} 张，成功转换 ${parts.length} 张` +
+      `识别到 ${segments.length} 张${fromQuote ? '（来自被引用的消息）' : ''}，成功转换 ${parts.length} 张` +
       `（${parts.map((p) => (p.data ? 'base64' : 'URL')).join('/') || '无'}）`
     )
     return parts
