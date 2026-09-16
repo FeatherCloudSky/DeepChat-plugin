@@ -8,7 +8,14 @@
   html, body { margin: 0; padding: 0; }
   body {
     width: {{width}}px;
-    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+    /* 出图是在服务器上跑的（puppeteer），用的是服务器的字体。
+       Windows/macOS 的中文字体在 Linux 上不存在，所以必须把常见 Linux 中文字体也列进来，
+       否则汉字会全部渲染成方框（tofu）。服务器至少要装其中一款：
+       Noto Sans CJK / 思源黑体 / 文泉驿。 */
+    font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+                 "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN",
+                 "WenQuanYi Zen Hei", "WenQuanYi Micro Hei", "Droid Sans Fallback",
+                 "AR PL UMing CN", "SimHei", sans-serif;
     color: #f2f4f8;
     -webkit-font-smoothing: antialiased;
   }

@@ -589,6 +589,28 @@ check('关键词不做正则解释（未命中返回空串）', Policy.matchAiKe
 check('关键词列表为空时不命中', Policy.matchAiKeyword('随便', []), '')
 Cfg.set('aiKeywords', [])
 
+// ---- 纯图片消息（没有文字）----
+// 回归：e.msg 是空串时不能被「没有文字」这道门拦掉
+calls.length = 0
+await chatInstance.accept(mockEvent({
+  isGroup: false, user_id: 777, msg: '',
+  message: [{ type: 'image', url: 'https://example.com/a.jpg' }]
+}))
+check('私聊纯图片消息能触发', calls.length, 1)
+check('私聊纯图片走主动模式', calls[0]?.mode, 'active')
+
+calls.length = 0
+await chatInstance.accept(mockEvent({
+  isGroup: true, group_id: 123456, user_id: 777, atme: true, msg: '',
+  message: [{ type: 'image', url: 'https://example.com/a.jpg' }],
+  bot: { info: { nickname: '小助手' } }
+}))
+check('群里艾特 + 纯图片也能触发', calls.length, 1)
+
+calls.length = 0
+await chatInstance.accept(mockEvent({ isGroup: false, user_id: 777, msg: '', message: [] }))
+check('既没文字也没图片时不触发', calls.length, 0)
+
 chatInstance.processChat = realProcessChat
 Cfg.set('aiName', '猫娘')
 Cfg.set('enablePseudoHuman', true)
@@ -821,6 +843,17 @@ console.log('\n=== 6.6 帮助出图与兜底 ===')
   noneHelp.e = noneEvent
   await noneHelp.help(noneEvent)
   checkTrue('宿主没有 runtime 时退回纯文本', String(noneEvent.__replied[0]).includes('#DeepHelp'))
+
+  // 出图跑在服务器上，字体栈必须包含 Linux 常见中文字体，否则汉字全是方框
+  const tplSrc = fs.readFileSync(path.join(pluginDir, 'resources', 'help', 'index.html'), 'utf8')
+  for (const [label, font] of [
+    ['Noto Sans CJK', 'Noto Sans CJK SC'],
+    ['思源黑体', 'Source Han Sans SC'],
+    ['文泉驿正黑', 'WenQuanYi Zen Hei'],
+    ['文泉驿微米黑', 'WenQuanYi Micro Hei']
+  ]) {
+    checkTrue('帮助图字体栈含 ' + label, tplSrc.includes(font))
+  }
 }
 
 // ============================================================ 6.4 许可与免责

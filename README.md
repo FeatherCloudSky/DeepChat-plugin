@@ -234,6 +234,28 @@ DeepChat-plugin/
 进插件前缩到了 1600×1600、424 KB —— 帮助卡片宽度才 1200px，
 留着 2500 万像素每渲染一次都要多解码几秒。
 
+### 出图需要服务器装中文字体（重要）
+
+帮助图是在**服务器上**用 puppeteer 渲染的，用的是**服务器的字体**。
+Windows / macOS 自带的中文字体在 Linux 上并不存在——如果服务器没装中文字体，
+**图片里的汉字会全部变成方框（tofu），而英文、数字、符号完全正常**，这就是最典型的症状。
+
+装一款即可：
+
+```bash
+# Alibaba Cloud Linux / CentOS / RHEL
+sudo yum install -y wqy-zenhei-fonts wqy-microhei-fonts
+
+# Debian / Ubuntu
+sudo apt update && sudo apt install -y fonts-noto-cjk
+
+# 装完刷新一下字体缓存
+sudo fc-cache -f -v
+```
+
+模板的字体栈已经覆盖 Noto Sans CJK / 思源黑体 / 文泉驿系列，装其中任意一款都能被认到。
+装完**重新发一次 `#DeepHelp`** 就会正常（不用重启）。
+
 如果宿主不支持渲染（`e.runtime` 缺失或没装 puppeteer），`#DeepHelp` 会自动退回
 纯文本形式，不会变成一个报错。
 

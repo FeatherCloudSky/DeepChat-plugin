@@ -178,10 +178,14 @@ export default class DeepChat extends plugin {
    * 返回 false 表示「我不管这条消息」。
    */
   async accept(e) {
-    if (!e.msg || typeof e.msg !== 'string') return false
+    // 注意：纯图片消息的 e.msg 是空字符串，不能因为「没有文字」就把它拦掉
+    if (typeof e.msg !== 'string') return false
     const msg = e.msg.trim()
-    if (!msg || msg.startsWith('#')) return false
+    if (msg.startsWith('#')) return false
     if (String(e.user_id) === String(e.self_id)) return false
+
+    const hasImage = collectImageSegments(e).length > 0
+    if (!msg && !hasImage) return false
 
     if (!Policy.resolveEnabled(e)) return false
 
