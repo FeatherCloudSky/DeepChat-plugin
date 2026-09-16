@@ -61,9 +61,13 @@ export class help extends plugin {
   async help(e = this.e) {
     const content = HelpContent.loadHelp()
 
-    // 优先出图；宿主渲染不可用时退回纯文本，保证帮助始终看得到
-    const rendered = await render('help/index', this.buildRenderData(content), { e, scale: 1.15 })
-    if (rendered) return rendered
+    // 优先出图。render() 成功时返回图片 base64，失败返回 null，
+    // 所以「截图失败」这种情况能真的兜住，而不是静默什么都不回。
+    const image = await render('help/index', this.buildRenderData(content), { e, scale: 1.15 })
+    if (image) {
+      if (typeof e?.reply === 'function') return e.reply(image)
+      return this.reply(image)
+    }
 
     const text = HelpContent.toPlainText(content)
     if (typeof e?.reply === 'function') return e.reply(text)

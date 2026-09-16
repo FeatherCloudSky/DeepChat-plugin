@@ -773,6 +773,56 @@ const plain = HelpContent.toPlainText(realHelp)
 checkTrue('纯文本兜底含 #DeepHelp', plain.includes('#DeepHelp'))
 checkTrue('纯文本兜底含 #chat开', plain.includes('#chat开'))
 
+// ============================================================ 6.6 帮助出图与兜底
+console.log('\n=== 6.6 帮助出图与兜底 ===')
+{
+  let captured = null
+
+  const okEvent = mockEvent({})
+  okEvent.runtime = {
+    render: async (plugin, tplPath, data, cfg) => {
+      captured = { plugin, tplPath, data, cfg }
+      return 'BASE64_IMAGE_DATA'
+    }
+  }
+  const okHelp = new helpMod.help()
+  okHelp.e = okEvent
+  await okHelp.help(okEvent)
+
+  check('出图成功时发的是图片 base64', okEvent.__replied[0], 'BASE64_IMAGE_DATA')
+  check('传给渲染器的插件名 = 文件夹名', captured?.plugin, 'DeepChat-plugin')
+  check('传给渲染器的模板相对路径', captured?.tplPath, 'help/index')
+  // 关键：默认模式下渲染器即使截图失败也返回 true，
+  // 所以必须用 base64 模式把图拿回来自己判断
+  check('使用 base64 模式', captured?.cfg?.retType, 'base64')
+  checkTrue('beforeRender 里设置了 sys.scale',
+    captured?.cfg?.beforeRender({ data: {} })?.sys?.scale > 0)
+  checkTrue('传给模板的数据里有分组', Array.isArray(captured?.data?.groups))
+  checkTrue('传给模板的数据里有背景',
+    typeof captured?.data?.bg === 'string' && captured.data.bg.length > 0)
+
+  // 渲染器返回空 = 截图失败，此时必须退回纯文本，而不是静默什么都不回
+  const emptyEvent = mockEvent({})
+  emptyEvent.runtime = { render: async () => '' }
+  const emptyHelp = new helpMod.help()
+  emptyHelp.e = emptyEvent
+  await emptyHelp.help(emptyEvent)
+  checkTrue('截图返回空时退回纯文本', String(emptyEvent.__replied[0]).includes('#DeepHelp'))
+
+  const throwEvent = mockEvent({})
+  throwEvent.runtime = { render: async () => { throw new Error('boom') } }
+  const throwHelp = new helpMod.help()
+  throwHelp.e = throwEvent
+  await throwHelp.help(throwEvent)
+  checkTrue('渲染抛异常时退回纯文本', String(throwEvent.__replied[0]).includes('#DeepHelp'))
+
+  const noneEvent = mockEvent({})
+  const noneHelp = new helpMod.help()
+  noneHelp.e = noneEvent
+  await noneHelp.help(noneEvent)
+  checkTrue('宿主没有 runtime 时退回纯文本', String(noneEvent.__replied[0]).includes('#DeepHelp'))
+}
+
 // ============================================================ 6.4 许可与免责
 console.log('\n=== 6.4 许可与免责声明 ===')
 const readPluginFile = (rel) => {

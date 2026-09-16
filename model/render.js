@@ -1,19 +1,27 @@
 import { pluginName } from '../config/constant.js'
 
 /**
- * 调用 Yunzai 的渲染器把模板截图成图片。
- * 返回消息 id / 结果，若宿主不支持渲染则返回 false，由调用方决定怎么兜底。
+ * 调用 Yunzai 的渲染器把模板截图成图片，成功返回 base64，失败返回 null。
+ *
+ * 为什么用 retType: 'base64' 而不是默认值：
+ * 看 Miao-Yunzai lib/plugins/runtime.js 的 render() 实现，末尾是
+ *   let ret = true
+ *   if (base64) { ret = await this.e.reply(base64) }
+ *   return cfg.retType === 'msgId' ? ret : true
+ * 也就是说默认模式下**即使截图失败、base64 为空，它也照样返回 true**，
+ * 调用方无从分辨「发出去了」和「静默失败」。那样我们的纯文本兜底永远不会触发。
+ * 用 base64 模式把图拿回来自己发，才能判断真假。
  */
-export default function render(tplPath, params, cfg = {}) {
+export default async function render(tplPath, params, cfg = {}) {
   const e = cfg.e
-  if (!e?.runtime) {
-    logger.error(`[${pluginName}] 未找到 e.runtime，请升级 Yunzai 后再使用图片帮助`)
-    return false
+  if (!e?.runtime?.render) {
+    logger.error(`[${pluginName}] 未找到 e.runtime.render，无法出图（请升级 Yunzai）`)
+    return null
   }
 
   try {
-    return e.runtime.render(pluginName, tplPath, params, {
-      retType: cfg.retMsgId ? 'msgId' : 'default',
+    const image = await e.runtime.render(pluginName, tplPath, params, {
+      retType: 'base64',
       beforeRender({ data }) {
         return {
           ...data,
@@ -21,8 +29,9 @@ export default function render(tplPath, params, cfg = {}) {
         }
       }
     })
+    return image || null
   } catch (error) {
     logger.error(`[${pluginName}] 渲染 ${tplPath} 失败：${error.message || error}`)
-    return false
+    return null
   }
 }
