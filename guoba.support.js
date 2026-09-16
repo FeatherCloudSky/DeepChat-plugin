@@ -34,9 +34,9 @@ export function supportGuoba() {
         {
           field: 'apiUrl',
           label: 'API 地址',
-          bottomHelpMessage: '基础地址，不带 /chat/completions 或 /messages。留空则用所选协议的官方地址',
+          bottomHelpMessage: '基础地址，不带 /chat/completions 或 /messages（填了也认）。DeepSeek 官方文档给的是 https://api.deepseek.com，没有 /v1；留空则用所选协议的官方地址',
           component: 'Input',
-          componentProps: { placeholder: 'https://api.deepseek.com/v1' }
+          componentProps: { placeholder: 'https://api.deepseek.com' }
         },
         {
           field: 'apiKey',
@@ -115,7 +115,7 @@ export function supportGuoba() {
         {
           field: 'imageDownload',
           label: '下载图片后以 base64 发送',
-          bottomHelpMessage: '开启后由插件先把图片下载下来再发给模型，适合服务商拉不到 QQ 临时图片地址的情况',
+          bottomHelpMessage: '强烈建议开启。不开时是把 QQ 的图片链接直接交给服务商，让它自己下载——而 QQ 图片是带鉴权、有时效的临时地址，服务商多半拉不到，症状就是「模型看不到图」。开启后由插件先下载再以 base64 内联发送，最可靠',
           component: 'Switch'
         },
         {
