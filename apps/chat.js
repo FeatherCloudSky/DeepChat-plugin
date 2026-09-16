@@ -87,6 +87,12 @@ async function segmentToImagePart(segment) {
     return { type: 'image', url: rawUrl }
   }
 
+  // 到这儿说明这段既没有可读的本地文件，也没有 http(s) 地址。
+  // 只打印「有哪些字段」，不打印字段值（可能很长）——用来定位适配器给了什么。
+  const fieldNames = Object.keys(segment || {})
+    .filter((k) => segment[k] !== undefined && segment[k] !== null && segment[k] !== '')
+    .join(', ')
+  logger.warn(`[${pluginName}] 图片段里没有可用地址。该段带有的字段：${fieldNames || '(空)'}`)
   return null
 }
 
@@ -329,16 +335,25 @@ export default class DeepChat extends plugin {
     if (segments.length === 0) return []
 
     const model = Cfg.get('model', '')
-    if (!Cfg.visionFor(model)) return []
+    if (!Cfg.visionFor(model)) {
+      logger.info(
+        `[${pluginName}] 这条消息带 ${segments.length} 张图，但模型「${model || '(未配置)'}」没有开启图片输入，` +
+        '已降级成 [图片] 文字。可在面板「模型能力 → 逐模型图片能力」里为它打开。'
+      )
+      return []
+    }
 
     const parts = []
     for (const segment of segments) {
       const part = await segmentToImagePart(segment)
       if (part) parts.push(part)
     }
-    if (parts.length === 0) {
-      logger.warn(`[${pluginName}] 检测到图片但无法获取内容（可能是本地文件不存在且没有可用 URL）`)
-    }
+
+    logger.info(
+      `[${pluginName}] 图片输入：模型「${model}」已开启图片能力，` +
+      `识别到 ${segments.length} 张，成功转换 ${parts.length} 张` +
+      `（${parts.map((p) => (p.data ? 'base64' : 'URL')).join('/') || '无'}）`
+    )
     return parts
   }
 

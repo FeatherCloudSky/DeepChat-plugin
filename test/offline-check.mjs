@@ -108,6 +108,9 @@ Cfg.set('modelVision', [
 ])
 check('visionFor 精确匹配', Cfg.visionFor('gpt-4o'), true)
 check('visionFor 落到通配项', Cfg.visionFor('deepseek-chat'), false)
+Cfg.set('modelVision', [{ key: 'DeepSeek-Flash', vision: true }])
+check('visionFor 忽略大小写', Cfg.visionFor('deepseek-flash'), true)
+check('visionFor 大写查询也命中', Cfg.visionFor('DEEPSEEK-FLASH'), true)
 Cfg.set('modelVision', [])
 Cfg.set('defaultVision', true)
 check('visionFor 回落到 defaultVision', Cfg.visionFor('any'), true)
@@ -748,6 +751,42 @@ console.log('\n=== 6.5 全链路：一条群消息 → 真实 API → 分条回�
     String(received[1].messages[received[1].messages.length - 1].content).includes('那武器呢'))
   check('全链路：system 消息没有被重复堆叠',
     received[1].messages.filter((m) => m.role === 'system').length, 1)
+
+  // ---- 带图片的一轮：验证图片真的被拼成多模态内容 ----
+  Cfg.set('imageMaxCount', 3)
+  Cfg.set('imageDownload', false)
+  Cfg.set('modelVision', [{ key: 'e2e-model', vision: true }])
+  received.length = 0
+
+  const imageEvent = makeGroupEvent('达达利亚 这是什么')
+  imageEvent.message = [
+    { type: 'text', text: '达达利亚 这是什么' },
+    { type: 'image', url: 'https://example.com/card.jpg' }
+  ]
+  await chatInstance.accept(imageEvent)
+
+  check('图片轮：发出了请求', received.length, 1)
+  const lastContent = received[0].messages[received[0].messages.length - 1].content
+  checkTrue('图片轮：用户消息变成分段数组', Array.isArray(lastContent))
+  checkTrue('图片轮：保留了文字段',
+    lastContent.some((p) => p.type === 'text' && String(p.text).includes('这是什么')))
+  check('图片轮：图片段是 OpenAI 的 image_url 结构',
+    JSON.stringify(lastContent.filter((p) => p.type === 'image_url')),
+    JSON.stringify([{ type: 'image_url', image_url: { url: 'https://example.com/card.jpg' } }]))
+
+  // 模型没开图片能力时，应当降级成 [图片] 文字，而不是把图片塞过去
+  Cfg.set('modelVision', [])
+  Cfg.set('defaultVision', false)
+  received.length = 0
+  const noVisionEvent = makeGroupEvent('达达利亚 这是什么')
+  noVisionEvent.message = [
+    { type: 'text', text: '达达利亚 这是什么' },
+    { type: 'image', url: 'https://example.com/card.jpg' }
+  ]
+  await chatInstance.accept(noVisionEvent)
+  const fallbackContent = received[0].messages[received[0].messages.length - 1].content
+  checkTrue('未开图片能力时降级为 [图片] 文字', String(fallbackContent).includes('[图片]'))
+  checkTrue('未开图片能力时不会带 image_url 段', !JSON.stringify(fallbackContent).includes('image_url'))
 
   await new Promise((resolve) => server.close(resolve))
   redisStore.clear()

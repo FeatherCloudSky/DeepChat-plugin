@@ -94,15 +94,18 @@ const Cfg = {
   /**
    * 查询指定模型是否支持图片输入。
    * 匹配顺序：精确匹配 modelVision 里的 key -> key 为 "*" 的通配项 -> defaultVision。
+   * 模型名忽略大小写（面板里写 DeepSeek-Flash 而配置里写 deepseek-flash 也不该漏）。
    */
   visionFor(model) {
     const target = String(model ?? '').trim()
+    const lower = target.toLowerCase()
     const list = Cfg.get('modelVision', [])
 
     if (Array.isArray(list)) {
       const rows = list.filter((row) => row && typeof row === 'object')
+      const keyOf = (row) => String(row.key ?? '').trim().toLowerCase()
 
-      const exact = rows.find((row) => String(row.key ?? '').trim() === target && target !== '')
+      const exact = rows.find((row) => target !== '' && keyOf(row) === lower)
       if (exact && typeof exact.vision === 'boolean') return exact.vision
 
       const wildcard = rows.find((row) => String(row.key ?? '').trim() === '*')
