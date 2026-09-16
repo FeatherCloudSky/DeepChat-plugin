@@ -1,8 +1,26 @@
 # DeepChat-plugin
 
-接入任意 **OpenAI 兼容 / Anthropic 兼容** API 的拟人聊天插件（Yunzai-Bot / Miao-Yunzai v3）。
+接入任意 **OpenAI 兼容 / Anthropic 兼容** API 的拟人聊天插件（Yunzai 系框架）。
 
 配置界面走 [锅巴插件](https://gitee.com/guoba-yunzai/guoba-plugin)，全部选项可视化，不需要手改 JSON。
+
+## 已在什么环境上验证
+
+**TRSS-Yunzai** + **DeepSeek V4.1 Flash**，实机跑通——包含帮助图、群聊与私聊对话、
+AI 名称与关键词触发、图片识别、引用图片、每会话开关、权限体系、锅巴面板。
+
+插件是按 Yunzai 插件体系的**通用接口**写的，没有用到某个分支特有的东西：
+
+| 用到的宿主能力 | 备注 |
+|---|---|
+| `plugin` 基类、`rule` / `priority` / `accept` 钩子 | Yunzai 插件体系通用 |
+| `e.runtime.render(..., { retType: 'base64' })` | 出图；宿主不支持时自动退回纯文本帮助 |
+| `redis` / `logger` 全局量 | 上下文缓存与日志 |
+| `e.group.getChatHistory` / `e.friend.getChatHistory` | 引用图片、附加上下文（icqq 接口） |
+| 插件目录下的 `guoba.support.js` 的 `supportGuoba()` | 锅巴面板；锅巴自身对 Miao-Yunzai / TRSS 都有适配 |
+
+其它要求：**Node.js > 16.14**（`fetch` 兜底见 `model/http.js`）、**Redis 可用**、
+**安装锅巴插件**，以及**服务器装了中文字体**（否则帮助图的汉字全是方框，见下文说明）。
 
 > ⚠️ **使用前请先读 [DISCLAIMER.md](./DISCLAIMER.md)。**
 > 本项目以 MIT 协议按"现状"开源，不提供任何明示或默示的担保。
@@ -49,7 +67,7 @@ cd ..
 
 目录名保持 `DeepChat-plugin` 即可（插件用自己的 `import.meta.url` 定位资源，放哪都能跑）。
 
-**运行环境**：Miao-Yunzai 3.1.3 声明的最低环境是 `Node.js > 16.14`，而全局 `fetch` 要到 Node 18 才默认可用。
+**运行环境**：Yunzai 系框架声明的最低环境是 `Node.js > 16.14`（Miao-Yunzai 3.1.3 的 README 写的就是这个），而全局 `fetch` 要到 Node 18 才默认可用。
 插件对此做了兜底——探测到没有 `fetch` 时自动退回 `node:http` / `node:https`，所以 16.14 以上都能跑。
 当前走的是哪条链路，`#chat状态` 里会直接写出来。
 

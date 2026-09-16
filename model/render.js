@@ -4,7 +4,7 @@ import { pluginName } from '../config/constant.js'
  * 调用 Yunzai 的渲染器把模板截图成图片，成功返回 base64，失败返回 null。
  *
  * 为什么用 retType: 'base64' 而不是默认值：
- * 看 Miao-Yunzai lib/plugins/runtime.js 的 render() 实现，末尾是
+ * 看 Miao-Yunzai lib/plugins/runtime.js 的 render() 实现（TRSS-Yunzai 行为一致，已实机验证），末尾是
  *   let ret = true
  *   if (base64) { ret = await this.e.reply(base64) }
  *   return cfg.retType === 'msgId' ? ret : true
