@@ -4,8 +4,35 @@
  */
 import Cfg from './Cfg.js'
 import ChatState from './ChatState.js'
+import Permission from './Permission.js'
 import { pluginName } from '../config/constant.js'
 import { idIn } from './utils.js'
+
+/**
+ * 谁能在当前会话使用「聊天记录」功能。
+ *
+ * 主人 / 管理员永远可以。普通成员按三级判定，和「启用控制」同一套写法：
+ *   1. 强制禁止的群（memberRecordDenyGroups）—— 最高优先级
+ *   2. 强制允许的群（memberRecordAllowGroups）
+ *   3. 全局默认（allowMemberRecord，默认关）
+ *
+ * 私聊没有「群」的概念，只吃全局默认。
+ *
+ * 为什么默认关：成员能开记录，就等于**成员能把群里所有人的发言打包发出来**，
+ * 属于隐私敏感操作，该由群主/管理员按群决定要不要放开。
+ */
+function canUseRecord(e) {
+  if (!e) return false
+  if (Permission.isAdmin(e)) return true
+
+  if (e.isGroup) {
+    const groupId = e.group_id
+    if (idIn(Cfg.getIdList('memberRecordDenyGroups'), groupId)) return false
+    if (idIn(Cfg.getIdList('memberRecordAllowGroups'), groupId)) return true
+  }
+
+  return Cfg.getBool('allowMemberRecord', false)
+}
 
 /**
  * AI 名称匹配。
@@ -137,7 +164,7 @@ function describe(e) {
   return { enabled, source, override }
 }
 
-export { resolveEnabled, shouldPseudoTrigger, describe }
+export { resolveEnabled, shouldPseudoTrigger, describe, canUseRecord }
 
 export default {
   resolveEnabled,
@@ -146,5 +173,6 @@ export default {
   matchAiName,
   matchAiKeyword,
   keywordList,
-  MAX_KEYWORDS
+  MAX_KEYWORDS,
+  canUseRecord
 }

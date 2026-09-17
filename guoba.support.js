@@ -379,6 +379,27 @@ export function supportGuoba() {
           component: 'InputNumber',
           componentProps: { min: 1, max: 720, step: 1, placeholder: '24' }
         },
+        {
+          field: 'allowMemberRecord',
+          label: '允许普通成员使用聊天记录',
+          bottomHelpMessage: '默认关。开启后，普通成员也能发 #记录 把群里所有人的发言打包发出来——' +
+            '这是隐私敏感操作，建议用下面两个群列表按群放开，而不是全局开',
+          component: 'Switch'
+        },
+        {
+          field: 'memberRecordAllowGroups',
+          label: '允许成员记录的群',
+          bottomHelpMessage: '这些群强制放开给普通成员，即使「允许成员使用」总开关是关的也放行（和「启用控制」里' +
+            '的启用列表同一个逻辑）。优先级低于下面的禁止列表',
+          component: 'GSelectGroup'
+        },
+        {
+          field: 'memberRecordDenyGroups',
+          label: '禁止成员记录的群',
+          bottomHelpMessage: '这些群里一律只有主人和管理员能记录，优先级最高——' +
+            '即使「允许成员使用」开着、也在允许列表里，这里照样拦下',
+          component: 'GSelectGroup'
+        },
 
         // ---------------------------------------------------------- 群发消息
         { label: '群发消息', component: 'SOFT_GROUP_BEGIN' },

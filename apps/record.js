@@ -1,5 +1,6 @@
 import Recorder from '../model/Recorder.js'
 import Permission from '../model/Permission.js'
+import Policy from '../model/Policy.js'
 import Cfg from '../model/Cfg.js'
 import { pluginName } from '../config/constant.js'
 
@@ -115,11 +116,14 @@ export class record extends plugin {
   }
 
   deny(e) {
-    return e.reply(`只有主人和管理员才能操作聊天记录（你当前是${Permission.roleLabel(e)}）。`)
+    const tip = e.isGroup
+      ? '想让普通成员也能用，请在锅巴面板「聊天记录」标签页里放开：打开「允许普通成员使用聊天记录」，或把本群加进「允许成员记录的群」。'
+      : '私聊里的记录只吃「允许普通成员使用聊天记录」这一个开关（群列表对私聊不生效）。'
+    return e.reply(`只有主人和管理员才能操作聊天记录（你当前是${Permission.roleLabel(e)}）。\n${tip}`)
   }
 
   async start(e) {
-    if (!Permission.isAdmin(e)) return this.deny(e)
+    if (!Policy.canUseRecord(e)) return this.deny(e)
     const meta = Recorder.start(e)
     if (!meta) return e.reply('这个会话已经在记录中了，发 #记录状态 可以看进度。')
     return e.reply(
@@ -129,7 +133,7 @@ export class record extends plugin {
   }
 
   async status(e) {
-    if (!Permission.isAdmin(e)) return this.deny(e)
+    if (!Policy.canUseRecord(e)) return this.deny(e)
     const meta = Recorder.get(e)
     if (!meta) return e.reply('当前会话没有在记录。发送 #记录 开始。')
     const max = Cfg.getNumber('recordMaxMessages', 2000, 10, 100000)
@@ -142,14 +146,14 @@ export class record extends plugin {
   }
 
   async cancel(e) {
-    if (!Permission.isAdmin(e)) return this.deny(e)
+    if (!Policy.canUseRecord(e)) return this.deny(e)
     const meta = Recorder.cancel(e)
     if (!meta) return e.reply('当前会话没有在记录。')
     return e.reply(`已丢弃 ${meta.label} 的这次记录（${meta.count} 条），没有发出来。`)
   }
 
   async stop(e) {
-    if (!Permission.isAdmin(e)) return this.deny(e)
+    if (!Policy.canUseRecord(e)) return this.deny(e)
 
     const result = Recorder.stop(e)
     if (!result) return e.reply('当前会话没有在记录。发送 #记录 开始。')

@@ -164,6 +164,48 @@ check('正则没命中', Policy.matchAiName('今天天气不错', '达达利亚|
 check('正则写错时退回关键词匹配', Policy.matchAiName('名字(未闭合', '名字(', true), true)
 check('正则模式仍然按整串搜索', Policy.matchAiName('不知道达达利亚圣遗物带什么好', '达达利亚', true), true)
 
+// ============================================================ 4.3 聊天记录准入
+console.log('\n=== 4.3 聊天记录准入：谁可以用 #记录 ===')
+const recGroup = (id) => ({ isGroup: true, group_id: id, user_id: 10001, self_id: 999 })
+const recPrivate = (id) => ({ isGroup: false, user_id: id, self_id: 999 })
+
+const resetRecordGate = () => {
+  Cfg.set('masterQQ', '')
+  Cfg.set('adminQQ', [])
+  Cfg.set('allowMemberRecord', false)
+  Cfg.set('memberRecordAllowGroups', [])
+  Cfg.set('memberRecordDenyGroups', [])
+}
+resetRecordGate()
+
+check('空事件直接拒掉', Policy.canUseRecord(null), false)
+check('默认关：普通成员在群里不能记录', Policy.canUseRecord(recGroup(123456)), false)
+check('默认关：普通成员的私聊也不能', Policy.canUseRecord(recPrivate(10001)), false)
+
+Cfg.set('allowMemberRecord', true)
+check('总开关打开后群聊放行', Policy.canUseRecord(recGroup(123456)), true)
+check('总开关打开后私聊也放行', Policy.canUseRecord(recPrivate(10001)), true)
+
+Cfg.set('allowMemberRecord', false)
+Cfg.set('memberRecordAllowGroups', [123456])
+check('允许列表里的群，总开关关着也放行', Policy.canUseRecord(recGroup(123456)), true)
+check('允许列表外的群仍然不能用', Policy.canUseRecord(recGroup(654321)), false)
+check('群列表不作用于私聊（哪怕 QQ 号碰巧相同）', Policy.canUseRecord(recPrivate(123456)), false)
+
+Cfg.set('allowMemberRecord', true)
+Cfg.set('memberRecordDenyGroups', [123456])
+check('禁止列表优先级最高：压过总开关', Policy.canUseRecord(recGroup(123456)), false)
+check('禁止列表压过允许列表', (Cfg.set('memberRecordAllowGroups', [123456]), Policy.canUseRecord(recGroup(123456))), false)
+check('禁止列表只作用于自己那几个群', Policy.canUseRecord(recGroup(654321)), true)
+
+Cfg.set('masterQQ', '10001')
+check('主人恒可用（即使在禁止列表里）', Policy.canUseRecord(recGroup(123456)), true)
+Cfg.set('masterQQ', '')
+Cfg.set('adminQQ', ['20001'])
+check('管理员在禁止列表里的群也恒可用', Policy.canUseRecord({ isGroup: true, group_id: 123456, user_id: 20001 }), true)
+check('管理员私聊恒可用', Policy.canUseRecord({ isGroup: false, user_id: 20001 }), true)
+resetRecordGate()
+
 // ============================================================ 5. 协议适配
 console.log('\n=== 5. Provider 协议适配 ===')
 const Provider = (await import(url('model/Provider.js'))).default
@@ -1126,6 +1168,65 @@ console.log('\n=== 6.8 定时群发 ===')
   check('取消返回原任务', cancelled.groups.length, 2)
   check('取消后 status 为 null', Broadcast.status(), null)
   check('取消后任务文件已删除', fs.existsSync(Broadcast.file), false)
+}
+
+// ============================================================ 6.9 记录命令的准入
+console.log('\n=== 6.9 #记录 命令的准入（逐群放行）===')
+{
+  const Recorder = (await import(url('model/Recorder.js'))).default
+  const recApp = new (await import(url('apps/record.js'))).record({})
+  const gid = 888001
+
+  const evt = (over = {}) => ({
+    isGroup: true, group_id: gid, group_name: '准入测试群',
+    user_id: 30001, self_id: 999, msg: '#记录',
+    message: [{ type: 'text', text: '#记录' }],
+    sender: { nickname: '路人', role: 'member' },
+    __replied: [],
+    reply(msg) { this.__replied.push(String(msg)); return Promise.resolve({ message_id: 1 }) },
+    ...over
+  })
+
+  Cfg.set('masterQQ', '10001')
+  Cfg.set('adminQQ', [])
+  Cfg.set('allowMemberRecord', false)
+  Cfg.set('memberRecordAllowGroups', [])
+  Cfg.set('memberRecordDenyGroups', [])
+
+  const denied = evt()
+  await recApp.start(denied)
+  check('默认：成员发 #记录 被拒', /只有主人和管理员/.test(denied.__replied[0] || ''), true)
+  check('被拒之后确实没开始记录', Recorder.isRecording(denied), false)
+  checkTrue('拒绝文案里给了面板开关的指引', /允许普通成员使用聊天记录/.test(denied.__replied[0] || ''))
+
+  Cfg.set('allowMemberRecord', true)
+  const allowed = evt()
+  await recApp.start(allowed)
+  check('总开关打开后成员能开始记录', /已开始记录/.test(allowed.__replied[0] || ''), true)
+  checkTrue('成员确实进入了记录状态', Recorder.isRecording(allowed))
+  const cancelled = Recorder.cancel(allowed)
+  Recorder.removeFile(cancelled.key)
+
+  Cfg.set('memberRecordDenyGroups', [gid])
+  const deniedAgain = evt()
+  await recApp.start(deniedAgain)
+  check('禁止列表里的群，成员又被拦回去', /只有主人和管理员/.test(deniedAgain.__replied[0] || ''), true)
+
+  Cfg.set('adminQQ', ['20001'])
+  const byAdmin = evt({ user_id: 20001 })
+  await recApp.start(byAdmin)
+  check('同一个群里管理员照常能用', /已开始记录/.test(byAdmin.__replied[0] || ''), true)
+  const cancelled2 = Recorder.cancel(byAdmin)
+  Recorder.removeFile(cancelled2.key)
+
+  const byMemberStatus = evt()
+  await recApp.status(byMemberStatus)
+  check('#记录状态 也吃同一套准入', /只有主人和管理员/.test(byMemberStatus.__replied[0] || ''), true)
+
+  Cfg.set('masterQQ', '')
+  Cfg.set('adminQQ', [])
+  Cfg.set('allowMemberRecord', false)
+  Cfg.set('memberRecordDenyGroups', [])
 }
 
 console.log('\n=== 7. 清理测试产生的文件 ===')
