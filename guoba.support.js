@@ -343,6 +343,43 @@ export function supportGuoba() {
           component: 'Switch'
         },
 
+        // ---------------------------------------------------------- 聊天记录
+        { label: '聊天记录', component: 'SOFT_GROUP_BEGIN' },
+        {
+          field: 'recordOutput',
+          label: '记录发送方式',
+          bottomHelpMessage: '发 #结束记录 时怎么把记录给你们。合并转发是 QQ 原生的「聊天记录」卡片，最体面；auto = 依次尝试 合并转发 → md 文件 → 纯文本',
+          component: 'Select',
+          componentProps: {
+            options: [
+              { label: 'auto — 依次降级（推荐）', value: 'auto' },
+              { label: '合并转发 — 聊天记录卡片', value: 'forward' },
+              { label: 'md 文件 — 发 Markdown', value: 'file' },
+              { label: '纯文本 — 直接发文字', value: 'text' }
+            ]
+          }
+        },
+        {
+          field: 'recordMaxMessages',
+          label: '单次记录上限（条）',
+          bottomHelpMessage: '超过就不再记录，避免刷屏的群把磁盘写爆；发 #记录状态 可以看到当前条数',
+          component: 'InputNumber',
+          componentProps: { min: 10, max: 100000, step: 10, placeholder: '2000' }
+        },
+        {
+          field: 'recordIncludeBot',
+          label: '记录机器人自己的发言',
+          bottomHelpMessage: '默认不记。开启后 AI 的回复也会进记录',
+          component: 'Switch'
+        },
+        {
+          field: 'recordExpireHours',
+          label: '未结束的记录保留时长（小时）',
+          bottomHelpMessage: '开了记录却一直没发 #结束记录 的，超过这个时间会被自动清理',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 720, step: 1, placeholder: '24' }
+        },
+
         // ---------------------------------------------------------- 伪人模式
         { label: '伪人模式', component: 'SOFT_GROUP_BEGIN' },
         {

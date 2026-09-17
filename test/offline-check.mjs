@@ -444,7 +444,7 @@ checkTrue('help 优先级最低（最先匹配）', helpInstance.priority < mana
 const indexMod = await import(url('index.js'))
 checkTrue('index.js 导出了 apps 对象',
   Boolean(indexMod.apps) && typeof indexMod.apps === 'object')
-check('apps 收集到的插件类', Object.keys(indexMod.apps).sort(), ['chat', 'help', 'manage'])
+check('apps 收集到的插件类', Object.keys(indexMod.apps).sort(), ['chat', 'help', 'manage', 'record'])
 checkTrue('apps 里每一项都是可实例化的类',
   Object.values(indexMod.apps).every((c) => typeof c === 'function' && c.prototype))
 checkTrue('apps 里的类都能 new 出来',
@@ -499,7 +499,7 @@ const guoba = guobaMod.supportGuoba()
 const tabLabels = guoba.configInfo.schemas.filter((s) => s.component === 'SOFT_GROUP_BEGIN').map((s) => s.label)
 check('锅巴面板标签页', tabLabels,
   ['API 配置', '模型能力', '基本配置', '分条发送', '上下文与缓存', '启用控制',
-   '权限设置', '伪人模式', '黑白名单设置', '帮助图'])
+   '权限设置', '聊天记录', '伪人模式', '黑白名单设置', '帮助图'])
 checkTrue('含逐模型图片能力字段', guoba.configInfo.schemas.some((s) => s.field === 'modelVision'))
 checkTrue('含帮助背景字段', guoba.configInfo.schemas.some((s) => s.field === 'helpBg'))
 checkTrue('含主人 QQ 字段', guoba.configInfo.schemas.some((s) => s.field === 'masterQQ'))
@@ -1008,12 +1008,88 @@ for (const [label, needle] of [
 checkTrue('README 里链接了免责声明', readPluginFile('README.md').includes('DISCLAIMER.md'))
 checkTrue('帮助图模板里有免责声明', readPluginFile('resources/help/index.html').includes('完整免责声明见'))
 
+// ============================================================ 6.7 聊天记录器
+console.log('\n=== 6.7 聊天记录器 ===')
+{
+  const recMod = await import(url('model/Recorder.js'))
+  const Recorder = recMod.default
+  const { segmentsToText } = recMod
+
+  check('转文本：纯文本', segmentsToText([{ type: 'text', text: '你好' }]), '你好')
+  check('转文本：图片', segmentsToText([{ type: 'text', text: '看图' }, { type: 'image', url: 'x' }]), '看图[图片]')
+  check('转文本：艾特与表情', segmentsToText([{ type: 'at', qq: 123 }, { type: 'face', id: 1 }]), '@123[表情]')
+  check('转文本：引用段不进正文',
+    segmentsToText([{ type: 'reply', id: 'a' }, { type: 'text', text: '嗯' }]), '嗯')
+  check('转文本：纯图片', segmentsToText([{ type: 'image', url: 'x' }]), '[图片]')
+  check('转文本：只有引用段则为空', segmentsToText([{ type: 'reply', id: 'a' }]), '')
+  check('转文本：字符串直接返回', segmentsToText('  直接传字符串  '), '直接传字符串')
+
+  const gid = 777001
+  const ev = (over = {}) => ({
+    isGroup: true, group_id: gid, group_name: '测试群',
+    user_id: 1001, self_id: 999,
+    message: [{ type: 'text', text: '第一条' }],
+    sender: { nickname: '甲', card: '' },
+    ...over
+  })
+
+  check('没在记录时 capture 返回 false', Recorder.capture(ev()), false)
+  checkTrue('开始记录返回元信息', !!Recorder.start(ev()))
+  check('重复开始返回 null', Recorder.start(ev()), null)
+
+  check('记录一条', Recorder.capture(ev()), true)
+  Recorder.capture(ev({ user_id: 1002, sender: { nickname: '乙' }, message: [{ type: 'text', text: '第二条' }] }))
+  check('机器人自己的发言默认不记',
+    Recorder.capture(ev({ user_id: 999, message: [{ type: 'text', text: '我是机器人' }] })), false)
+  check('只有引用段的消息不记',
+    Recorder.capture(ev({ message: [{ type: 'reply', id: 'x' }] })), false)
+  check('已记录条数', Recorder.get(ev()).count, 2)
+
+  Cfg.set('recordIncludeBot', true)
+  check('开启后记录机器人发言',
+    Recorder.capture(ev({ user_id: 999, sender: { nickname: '机器人' }, message: [{ type: 'text', text: '我是机器人' }] })), true)
+  Cfg.set('recordIncludeBot', false)
+
+  const stopped = Recorder.stop(ev())
+  check('结束后拿到 3 条', stopped.rows.length, 3)
+  check('记录内容与顺序正确', stopped.rows.map((r) => r.msg), ['第一条', '第二条', '我是机器人'])
+  check('昵称被记下来了', stopped.rows[0].name, '甲')
+  check('结束后不再是记录状态', Recorder.isRecording(ev()), false)
+  Recorder.removeFile(stopped.meta.key)
+
+  Recorder.start(ev())
+  Recorder.capture(ev())
+  const cancelled = Recorder.cancel(ev())
+  checkTrue('取消返回元信息', !!cancelled)
+  check('取消后不再记录', Recorder.isRecording(ev()), false)
+  check('取消后记录文件已删除',
+    fs.existsSync(path.join(pluginDir, 'data', 'record', cancelled.key + '.jsonl')), false)
+
+  Cfg.set('recordMaxMessages', 10)
+  Recorder.start(ev())
+  for (let i = 0; i < 15; i++) Recorder.capture(ev({ message: [{ type: 'text', text: '第' + i + '条' }] }))
+  const capped = Recorder.stop(ev())
+  check('超过上限后不再记录', capped.rows.length, 10)
+  check('标记了已达上限', capped.meta.capped, true)
+  Recorder.removeFile(capped.meta.key)
+  Cfg.set('recordMaxMessages', 2000)
+
+  const priv = { isGroup: false, user_id: 1001, self_id: 999, message: [{ type: 'text', text: '私聊一' }], sender: { nickname: '甲' } }
+  Recorder.start(priv)
+  Recorder.capture(priv)
+  check('私聊与群聊的记录互不干扰', Recorder.isRecording(ev()), false)
+  const privStop = Recorder.stop(priv)
+  check('私聊记录内容', privStop.rows.map((r) => r.msg), ['私聊一'])
+  Recorder.removeFile(privStop.meta.key)
+}
+
 console.log('\n=== 7. 清理测试产生的文件 ===')
-const leftovers = ['data/cfg.json', 'data/state.json']
+const leftovers = ['data/cfg.json', 'data/state.json', 'data/record']
 for (const rel of leftovers) {
   const p = path.join(pluginDir, rel)
-  if (fs.existsSync(p)) { fs.unlinkSync(p); console.log(`  已删除 ${rel}`) }
-  else { console.log(`  ${rel} 不存在（无需清理）`) }
+  if (!fs.existsSync(p)) { console.log(`  ${rel} 不存在（无需清理）`); continue }
+  fs.rmSync(p, { recursive: true, force: true })
+  console.log(`  已删除 ${rel}`)
 }
 
 console.log(`\n================ 结果：${pass} 通过 / ${fail} 失败 ================`)
