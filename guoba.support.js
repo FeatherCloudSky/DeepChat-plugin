@@ -380,6 +380,43 @@ export function supportGuoba() {
           componentProps: { min: 1, max: 720, step: 1, placeholder: '24' }
         },
 
+        // ---------------------------------------------------------- 群发消息
+        { label: '群发消息', component: 'SOFT_GROUP_BEGIN' },
+        {
+          field: 'broadcastGroups',
+          label: '要群发的群',
+          bottomHelpMessage: '选好群、填好内容后，在任意会话发 #群发 才会真正发出去。面板本身不会自动发——群发是这类插件里最容易让账号被风控的动作，得你明确扣一次扳机',
+          component: 'GSelectGroup'
+        },
+        {
+          field: 'broadcastContent',
+          label: '群发内容',
+          bottomHelpMessage: '要统一发出去的文字',
+          component: 'InputTextArea',
+          componentProps: { rows: 5, placeholder: '要发的内容…' }
+        },
+        {
+          field: 'broadcastDelayMinutes',
+          label: '延迟发送（分钟）',
+          bottomHelpMessage: '发 #群发 之后等多少分钟开始发；0 表示立刻开始',
+          component: 'InputNumber',
+          componentProps: { min: 0, max: 1440, step: 1, placeholder: '1' }
+        },
+        {
+          field: 'broadcastGapSeconds',
+          label: '群与群之间的随机间隔（秒）',
+          bottomHelpMessage: '格式：下限-上限，例如 10-60。每条之间随机等这么久，避免被风控当成机器扫射',
+          component: 'Input',
+          componentProps: { placeholder: '10-60' }
+        },
+        {
+          field: 'broadcastMaxGroups',
+          label: '单次群发群数上限',
+          bottomHelpMessage: '超过就拒绝执行，防止手滑选中一堆群',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 100, step: 1, placeholder: '20' }
+        },
+
         // ---------------------------------------------------------- 伪人模式
         { label: '伪人模式', component: 'SOFT_GROUP_BEGIN' },
         {

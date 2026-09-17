@@ -444,7 +444,8 @@ checkTrue('help 优先级最低（最先匹配）', helpInstance.priority < mana
 const indexMod = await import(url('index.js'))
 checkTrue('index.js 导出了 apps 对象',
   Boolean(indexMod.apps) && typeof indexMod.apps === 'object')
-check('apps 收集到的插件类', Object.keys(indexMod.apps).sort(), ['chat', 'help', 'manage', 'record'])
+check('apps 收集到的插件类', Object.keys(indexMod.apps).sort(),
+  ['broadcast', 'chat', 'help', 'manage', 'record'])
 checkTrue('apps 里每一项都是可实例化的类',
   Object.values(indexMod.apps).every((c) => typeof c === 'function' && c.prototype))
 checkTrue('apps 里的类都能 new 出来',
@@ -499,7 +500,7 @@ const guoba = guobaMod.supportGuoba()
 const tabLabels = guoba.configInfo.schemas.filter((s) => s.component === 'SOFT_GROUP_BEGIN').map((s) => s.label)
 check('锅巴面板标签页', tabLabels,
   ['API 配置', '模型能力', '基本配置', '分条发送', '上下文与缓存', '启用控制',
-   '权限设置', '聊天记录', '伪人模式', '黑白名单设置', '帮助图'])
+   '权限设置', '聊天记录', '群发消息', '伪人模式', '黑白名单设置', '帮助图'])
 checkTrue('含逐模型图片能力字段', guoba.configInfo.schemas.some((s) => s.field === 'modelVision'))
 checkTrue('含帮助背景字段', guoba.configInfo.schemas.some((s) => s.field === 'helpBg'))
 checkTrue('含主人 QQ 字段', guoba.configInfo.schemas.some((s) => s.field === 'masterQQ'))
@@ -1083,8 +1084,52 @@ console.log('\n=== 6.7 聊天记录器 ===')
   Recorder.removeFile(privStop.meta.key)
 }
 
+// ============================================================ 6.8 定时群发
+console.log('\n=== 6.8 定时群发 ===')
+{
+  const bcMod = await import(url('model/Broadcast.js'))
+  const Broadcast = bcMod.default
+  const { normalizeGroupIds, parseGapRange } = bcMod
+
+  check('群列表：数字数组', normalizeGroupIds([123, 456]), [123, 456])
+  check('群列表：字符串数组', normalizeGroupIds(['123', '456']), [123, 456])
+  check('群列表：对象数组（GSelectGroup 形状）',
+    normalizeGroupIds([{ id: 123, name: 'a' }, { group_id: '456' }]), [123, 456])
+  check('群列表：去重', normalizeGroupIds([123, '123', 456]), [123, 456])
+  check('群列表：逗号分隔字符串', normalizeGroupIds('123,456'), [123, 456])
+  check('群列表：过滤非法值', normalizeGroupIds([0, -1, null, 'abc', 789]), [789])
+  check('群列表：空字符串', normalizeGroupIds(''), [])
+  check('群列表：null', normalizeGroupIds(null), [])
+
+  check('间隔：10-60', parseGapRange('10-60'), { minMs: 10000, maxMs: 60000 })
+  check('间隔：写反了也纠正', parseGapRange('60-10'), { minMs: 10000, maxMs: 60000 })
+  check('间隔：空值用默认', parseGapRange(''), { minMs: 10000, maxMs: 60000 })
+  check('间隔：只有空白也用默认', parseGapRange('   '), { minMs: 10000, maxMs: 60000 })
+  check('间隔：单个数字表示固定值', parseGapRange('30'), { minMs: 30000, maxMs: 30000 })
+  check('间隔：写一半也认', parseGapRange('15-'), { minMs: 15000, maxMs: 15000 })
+  check('间隔：非数字用默认', parseGapRange('abc'), { minMs: 10000, maxMs: 60000 })
+  check('间隔：上限封到 600 秒', parseGapRange('10-9999'), { minMs: 10000, maxMs: 600000 })
+
+  check('没有任务时 status 为 null', Broadcast.status(), null)
+  check('没有任务时 cancel 为 null', Broadcast.cancel(), null)
+
+  const job = Broadcast.schedule({
+    groups: [111, 222], content: '测试内容', delayMinutes: 60, gap: '10-60', by: '10001'
+  })
+  checkTrue('排定后拿到任务', !!job)
+  check('排定后 status 有值', Broadcast.status().groups.length, 2)
+  check('重复排定会被拒绝',
+    Broadcast.schedule({ groups: [333], content: 'x', delayMinutes: 1, gap: '', by: '1' }), null)
+  check('任务文件已写入', fs.existsSync(Broadcast.file), true)
+
+  const cancelled = Broadcast.cancel()
+  check('取消返回原任务', cancelled.groups.length, 2)
+  check('取消后 status 为 null', Broadcast.status(), null)
+  check('取消后任务文件已删除', fs.existsSync(Broadcast.file), false)
+}
+
 console.log('\n=== 7. 清理测试产生的文件 ===')
-const leftovers = ['data/cfg.json', 'data/state.json', 'data/record']
+const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json']
 for (const rel of leftovers) {
   const p = path.join(pluginDir, rel)
   if (!fs.existsSync(p)) { console.log(`  ${rel} 不存在（无需清理）`); continue }
