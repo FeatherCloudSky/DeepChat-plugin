@@ -316,10 +316,14 @@ DeepChat-plugin/
 │   ├── broadcast.js          #群发 / #群发状态 / #群发取消
 │   ├── soup.js               #汤面 / #删除汤面
 │   └── help.js               帮助（出图，失败退回纯文本）
-├── resources/help/
-│   ├── help.md               帮助文案（唯一来源，改这里就行）
-│   ├── index.html            帮助图模板（art-template）
-│   └── theme/default/bg.jpg  自带的默认背景
+├── resources/
+│   ├── help/
+│   │   ├── help.md           帮助文案（唯一来源，改这里就行）
+│   │   ├── index.html        帮助图模板（art-template）
+│   │   └── theme/default/bg.jpg  自带的默认背景
+│   └── images/
+│       ├── icon.png          面板图标（原创，MIT）
+│       └── icon.svg          图标的矢量源文件
 ├── test/
 │   ├── offline-check.mjs     离线回归测试（行为）
 │   └── consistency-check.mjs 一致性检查（跨文件漂移）

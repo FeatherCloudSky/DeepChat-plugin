@@ -149,7 +149,8 @@ if (strays.length) fail('data/ 里有残留文件：' + strays.join(', '))
 else ok('data/ 只有 cfg_default.json')
 
 for (const need of ['LICENSE', 'DISCLAIMER.md', 'README.md', 'package.json', 'index.js',
-                    'resources/help/help.md', 'resources/help/theme/default/bg.jpg']) {
+                    'resources/help/help.md', 'resources/help/theme/default/bg.jpg',
+                    'resources/images/icon.png', 'resources/images/icon.svg']) {
   if (!fs.existsSync(path.join(pluginDir, need))) fail('缺少文件：' + need)
 }
 ok('许可 / 声明 / 帮助资源 / 入口文件都在')

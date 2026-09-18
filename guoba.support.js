@@ -5,6 +5,8 @@
  * 其余字段按顺序渲染到该标签页里。
  */
 import Cfg from './model/Cfg.js'
+import path from 'node:path'
+import { pluginResources } from './config/constant.js'
 
 export function supportGuoba() {
   return {
@@ -18,7 +20,11 @@ export function supportGuoba() {
       isV2: false,
       description: '接入 OpenAI / Anthropic 兼容 API 的拟人聊天插件 · MIT 开源，使用前请阅读免责声明',
       icon: 'mdi:robot-happy-outline',
-      iconColor: '#5b8def'
+      iconColor: '#5b8def',
+      // 面板里优先显示这张图（锅巴会把 iconPath 指向的文件直接当图片发过来）；
+      // 上面那个 icon 只是它加载不到图片时的兜底，别删。
+      // 图是插件自带的原创素材，用 work/make-icon.py 从同目录的 icon.svg 生成。
+      iconPath: path.join(pluginResources, 'images', 'icon.png')
     },
 
     configInfo: {

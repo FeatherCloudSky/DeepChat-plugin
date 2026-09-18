@@ -547,6 +547,21 @@ checkTrue('含逐模型图片能力字段', guoba.configInfo.schemas.some((s) =>
 checkTrue('含帮助背景字段', guoba.configInfo.schemas.some((s) => s.field === 'helpBg'))
 checkTrue('含主人 QQ 字段', guoba.configInfo.schemas.some((s) => s.field === 'masterQQ'))
 
+// 面板左上角那个图标：锅巴拿到的是 iconPath 指向的文件，路径必须在插件自己目录里，
+// 否则换台机器 / 换个目录名就裂了
+checkTrue('面板图标指向插件自带的图片',
+  path.isAbsolute(guoba.pluginInfo?.iconPath || '') &&
+  guoba.pluginInfo.iconPath.endsWith(path.join('resources', 'images', 'icon.png')))
+{
+  const iconPng = path.join(pluginDir, 'resources', 'images', 'icon.png')
+  const iconSvg = path.join(pluginDir, 'resources', 'images', 'icon.svg')
+  const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  checkTrue('图标 PNG 存在', fs.existsSync(iconPng))
+  check('图标文件确实是一张 PNG',
+    fs.existsSync(iconPng) && fs.readFileSync(iconPng).subarray(0, 8).equals(pngMagic), true)
+  checkTrue('图标的矢量源文件也在', fs.existsSync(iconSvg))
+}
+
 // ============================================================ 6.2 权限
 console.log('\n=== 6.2 权限判定 ===')
 const Permission = (await import(url('model/Permission.js'))).default

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="DeepChat">
+  <title>DeepChat</title>
+  <defs>
+    <linearGradient id="deepchat" gradientUnits="userSpaceOnUse" x1="64" y1="48" x2="448" y2="470">
+      <stop offset="0" stop-color="#6FB2FF"/>
+      <stop offset="1" stop-color="#3F5EE8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 气泡本体 + 猫耳 + 尾巴，同一个渐变，一眼是「聊天」 -->
+  <g fill="url(#deepchat)">
+    <path d="M148 48 L112 124 L208 124 Z"/>
+    <path d="M364 48 L304 124 L400 124 Z"/>
+    <rect x="64" y="112" width="384" height="272" rx="88"/>
+    <path d="M152 366 L104 458 L248 380 Z"/>
+  </g>
+
+  <!-- 三个打字点 -->
+  <g fill="#FFFFFF">
+    <circle cx="176" cy="248" r="26"/>
+    <circle cx="256" cy="248" r="26"/>
+    <circle cx="336" cy="248" r="26"/>
+  </g>
+</svg>
