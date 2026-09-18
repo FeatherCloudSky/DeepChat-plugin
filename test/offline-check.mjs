@@ -487,7 +487,7 @@ const indexMod = await import(url('index.js'))
 checkTrue('index.js 导出了 apps 对象',
   Boolean(indexMod.apps) && typeof indexMod.apps === 'object')
 check('apps 收集到的插件类', Object.keys(indexMod.apps).sort(),
-  ['broadcast', 'chat', 'help', 'manage', 'record'])
+  ['broadcast', 'chat', 'help', 'manage', 'record', 'soup'])
 checkTrue('apps 里每一项都是可实例化的类',
   Object.values(indexMod.apps).every((c) => typeof c === 'function' && c.prototype))
 checkTrue('apps 里的类都能 new 出来',
@@ -542,7 +542,7 @@ const guoba = guobaMod.supportGuoba()
 const tabLabels = guoba.configInfo.schemas.filter((s) => s.component === 'SOFT_GROUP_BEGIN').map((s) => s.label)
 check('锅巴面板标签页', tabLabels,
   ['API 配置', '模型能力', '基本配置', '分条发送', '上下文与缓存', '启用控制',
-   '权限设置', '聊天记录', '群发消息', '伪人模式', '黑白名单设置', '帮助图'])
+   '权限设置', '聊天记录', '海龟汤', '群发消息', '伪人模式', '黑白名单设置', '帮助图'])
 checkTrue('含逐模型图片能力字段', guoba.configInfo.schemas.some((s) => s.field === 'modelVision'))
 checkTrue('含帮助背景字段', guoba.configInfo.schemas.some((s) => s.field === 'helpBg'))
 checkTrue('含主人 QQ 字段', guoba.configInfo.schemas.some((s) => s.field === 'masterQQ'))
@@ -1229,8 +1229,212 @@ console.log('\n=== 6.9 #记录 命令的准入（逐群放行）===')
   Cfg.set('memberRecordDenyGroups', [])
 }
 
+// ============================================================ 6.10 海龟汤·汤面
+console.log('\n=== 6.10 海龟汤汤面 ===')
+{
+  const Soup = (await import(url('model/Soup.js'))).default
+  const soupMod = await import(url('apps/soup.js'))
+  const { replyIdOf, findQuotedMessage } = await import(url('model/utils.js'))
+
+  const gid = 880011
+  const evt = (over = {}) => {
+    const e = {
+      isGroup: true, group_id: gid, group_name: '汤面测试群',
+      user_id: 1001, self_id: 999,
+      msg: '#汤面', message: [{ type: 'text', text: '#汤面' }],
+      sender: { nickname: '甲', card: '甲' },
+      __replied: [], __raw: []
+    }
+    e.reply = (msg) => {
+      e.__raw.push(msg)
+      e.__replied.push(String(msg))
+      return Promise.resolve({ message_id: 7 })
+    }
+    return Object.assign(e, over)
+  }
+
+  const soupApp = new soupMod.soup()
+  soupApp.e = evt()
+
+  // ---- 引用关系：三种写法都要认
+  check('引用 id：e.reply_id 优先', replyIdOf({ reply_id: 11, source: { message_id: 22 } }), '11')
+  check('引用 id：退回 e.source', replyIdOf({ source: { message_id: 22 } }), '22')
+  check('引用 id：再退回 reply 段', replyIdOf({ message: [{ type: 'reply', id: 33 }] }), '33')
+  check('引用 id：都没有则为空', replyIdOf({ message: [{ type: 'text', text: 'x' }] }), '')
+  check('引用 id：空事件不炸', replyIdOf(null), '')
+
+  const windows = []
+  const fallbackEvent = evt({
+    message: [{ type: 'reply', id: 'm1' }],
+    group: {
+      getChatHistory: async (start, count) => {
+        windows.push(count)
+        return count >= 120 ? [{ message_id: 'm1', message: [{ type: 'text', text: '晚点才翻到' }] }] : []
+      }
+    }
+  })
+  const found = await findQuotedMessage(fallbackEvent, [30, 120])
+  check('翻记录：先试小范围再扩大', windows, [30, 120])
+  check('翻记录：扩大后拿到内容', found?.message?.[0]?.text, '晚点才翻到')
+  check('翻记录：没引用就不去翻', await findQuotedMessage(evt(), [30]), null)
+
+  // ---- 存储层：增删查、覆盖、隔离、过期
+  Cfg.set('soupEnable', true)
+  Cfg.set('soupAllowMember', true)
+  Cfg.set('soupExpireHours', 24)
+  Cfg.set('soupMaxImages', 3)
+  Cfg.set('soupRefreshOnView', false)
+  Cfg.set('masterQQ', '')
+  Cfg.set('adminQQ', [])
+
+  const quiet = evt()
+  check('没记过的时候读不到汤面', Soup.get(quiet), null)
+
+  const meta = Soup.save(quiet, { text: '他喝了一口汤就哭了' })
+  check('记下的文字读得回来', Soup.get(quiet)?.text, '他喝了一口汤就哭了')
+  check('默认存 24 小时', Math.round((meta.expiresAt - meta.createdAt) / 3600000), 24)
+  check('汤面挂在会话上（key = 群号）', meta.key, `group_${gid}`)
+  checkTrue('元信息落了盘', fs.existsSync(path.join(Soup.dir, `group_${gid}.json`)))
+
+  const bytes = Buffer.from('SOUPPNG')
+  const withImage = Soup.save(quiet, { text: '', images: [{ data: bytes, ext: '.png', url: 'https://example.com/a.png' }] })
+  check('图片汤面：存下 1 张', withImage.images.length, 1)
+  checkTrue('图片落了盘', fs.existsSync(path.join(Soup.dir, withImage.images[0].name)))
+  check('图片字节读得回来', Soup.imageBuffer(withImage, withImage.images[0]).toString(), 'SOUPPNG')
+
+  Soup.save(quiet, { text: '换一张', images: [{ data: bytes, ext: '.jpg' }] })
+  check('重新记录会覆盖旧的', Soup.get(quiet)?.text, '换一张')
+  check('覆盖时旧图被清掉', fs.existsSync(path.join(Soup.dir, withImage.images[0].name)), false)
+
+  check('别的群看不到', Soup.get(evt({ group_id: 880012 })), null)
+  check('私聊单独一份', Soup.get(evt({ isGroup: false, user_id: 1001 })), null)
+
+  Cfg.set('soupExpireHours', 1)
+  Soup.save(quiet, { text: '一小时后过期' })
+  check('改了时长立刻按新的算', Math.round((Soup.get(quiet).expiresAt - Date.now()) / 60000), 60)
+  Soup.get(quiet).expiresAt = Date.now() - 1
+  check('过期后读不到', Soup.get(quiet), null)
+  check('过期后元信息也清掉了', fs.existsSync(path.join(Soup.dir, `group_${gid}.json`)), false)
+  Cfg.set('soupExpireHours', 24)
+
+  // ---- 应用层：记 / 看 / 删
+  const soupMsg = {
+    message_id: 'soup-1',
+    raw_message: '他喝了一口汤就哭了',
+    message: [{ type: 'text', text: '他喝了一口汤就哭了' }]
+  }
+  const quote = (quoted, over = {}) => evt({
+    message: [{ type: 'reply', id: quoted.message_id }, { type: 'text', text: '#汤面' }],
+    group: { getChatHistory: async () => [quoted] },
+    ...over
+  })
+
+  const emptyView = evt()
+  await soupApp.soup(emptyView)
+  checkTrue('没记过就查看时给出记录指引', /还没有记录汤面/.test(emptyView.__replied[0] || ''))
+
+  const recordEvent = quote(soupMsg)
+  await soupApp.soup(recordEvent)
+  checkTrue('引用 + #汤面 记下了', /已记录/.test(recordEvent.__replied[0] || ''))
+
+  const viewEvent = evt()
+  await soupApp.soup(viewEvent)
+  checkTrue('之后发 #汤面 能再看一次', /他喝了一口汤就哭了/.test(viewEvent.__replied[0] || ''))
+  checkTrue('查看时带上了剩余时间', /还剩/.test(viewEvent.__replied[0] || ''))
+
+  // 汤面属于会话，不属于发汤面的人：别人引用同一条也能记
+  const byOther = quote(soupMsg, { user_id: 2002, sender: { nickname: '乙', card: '乙' } })
+  await soupApp.soup(byOther)
+  check('别人引用同一条汤面也能记', Soup.get(byOther)?.ownerName, '乙')
+
+  // ---- 权限：普通成员开关
+  Cfg.set('soupAllowMember', false)
+
+  const deniedRecord = quote(soupMsg)
+  await soupApp.soup(deniedRecord)
+  checkTrue('关掉成员开关：成员记不了', /只有主人和管理员/.test(deniedRecord.__replied[0] || ''))
+  checkTrue('拒绝文案给出面板指引', /允许普通成员使用/.test(deniedRecord.__replied[0] || ''))
+
+  const deniedView = evt()
+  await soupApp.soup(deniedView)
+  checkTrue('查看不受成员开关影响', /他喝了一口汤就哭了/.test(deniedView.__replied[0] || ''))
+
+  const deniedRemove = evt()
+  await soupApp.remove(deniedRemove)
+  checkTrue('关掉成员开关：成员删不了', /只有主人和管理员/.test(deniedRemove.__replied[0] || ''))
+
+  Cfg.set('adminQQ', ['3003'])
+  const byAdmin = quote(soupMsg, { user_id: 3003, sender: { nickname: '丙', card: '丙' } })
+  await soupApp.soup(byAdmin)
+  checkTrue('管理员不受开关限制', /已记录/.test(byAdmin.__replied[0] || ''))
+  Cfg.set('adminQQ', [])
+  Cfg.set('soupAllowMember', true)
+
+  // ---- 图片汤面：本地临时文件 / 只有 URL / 内网地址
+  fs.mkdirSync(Soup.dir, { recursive: true })
+  const fixture = path.join(Soup.dir, 'fixture.png')
+  fs.writeFileSync(fixture, Buffer.from('LOCALIMG'))
+
+  const imgRecord = quote({ message_id: 'soup-img', message: [{ type: 'image', file: fixture }] })
+  await soupApp.soup(imgRecord)
+  checkTrue('引用图片也能记', /已记录/.test(imgRecord.__replied[0] || ''))
+  check('图片汤面存下 1 张', Soup.get(imgRecord)?.images?.length, 1)
+  check('记录时回一份图确认', Buffer.isBuffer(imgRecord.__raw[1]), true)
+
+  const imgView = evt()
+  await soupApp.soup(imgView)
+  check('图片汤面查看时回的是图片', Buffer.isBuffer(imgView.__raw[1]), true)
+  check('回出来的字节和存的一致', imgView.__raw[1].toString(), 'LOCALIMG')
+
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(Buffer.from('REMOTEIMG'), {
+    status: 200, headers: { 'content-type': 'image/webp' }
+  })
+  const remoteRecord = quote({ message_id: 'soup-remote', message: [{ type: 'image', url: 'https://example.com/remote.jpg' }] })
+  await soupApp.soup(remoteRecord)
+  const remoteMeta = Soup.get(remoteRecord)
+  globalThis.fetch = originalFetch
+  check('只有 URL 的图会被下载下来', remoteMeta?.images?.[0]?.bytes, 9)
+  check('扩展名按 content-type 走', remoteMeta?.images?.[0]?.name?.endsWith('.webp'), true)
+
+  const internalRecord = quote({
+    message_id: 'soup-internal',
+    message: [{ type: 'image', url: 'http://127.0.0.1/a.png' }, { type: 'text', text: '汤面在这' }]
+  })
+  await soupApp.soup(internalRecord)
+  check('非公网图片被跳过，文字照常记', Soup.get(internalRecord)?.text, '汤面在这')
+  check('被跳过的图不会留在汤面里', Soup.get(internalRecord)?.images?.length, 0)
+
+  // ---- 删除
+  const del = evt()
+  await soupApp.remove(del)
+  checkTrue('删除汤面', /已删除/.test(del.__replied[0] || ''))
+  check('删完就读不到了', Soup.get(del), null)
+  check('删完元信息文件也没了', fs.existsSync(path.join(Soup.dir, `group_${gid}.json`)), false)
+
+  const afterDelete = evt()
+  await soupApp.soup(afterDelete)
+  checkTrue('删完再查看就是「没有记录」', /还没有记录汤面/.test(afterDelete.__replied[0] || ''))
+
+  const nothingToDelete = evt()
+  await soupApp.remove(nothingToDelete)
+  checkTrue('没记过时删除给出提示', /没什么可删的/.test(nothingToDelete.__replied[0] || ''))
+
+  // ---- 总开关
+  Cfg.set('soupEnable', false)
+  const disabled = evt()
+  await soupApp.soup(disabled)
+  checkTrue('关掉功能后 #汤面 不响应', /关闭/.test(disabled.__replied[0] || ''))
+  const disabledRemove = evt()
+  await soupApp.remove(disabledRemove)
+  checkTrue('关掉功能后 #删除汤面 也不响应', /关闭/.test(disabledRemove.__replied[0] || ''))
+  Cfg.set('soupEnable', true)
+
+  fs.rmSync(fixture, { force: true })
+}
+
 console.log('\n=== 7. 清理测试产生的文件 ===')
-const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json']
+const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json', 'data/soup']
 for (const rel of leftovers) {
   const p = path.join(pluginDir, rel)
   if (!fs.existsSync(p)) { console.log(`  ${rel} 不存在（无需清理）`); continue }

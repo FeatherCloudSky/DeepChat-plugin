@@ -6,7 +6,7 @@ import Policy from '../model/Policy.js'
 import Permission from '../model/Permission.js'
 import { getBuffer } from '../model/http.js'
 import { pluginName } from '../config/constant.js'
-import { splitReply, sleep, isBlank, isPublicHttpUrl } from '../model/utils.js'
+import { splitReply, sleep, isBlank, isPublicHttpUrl, replyIdOf, findQuotedMessage } from '../model/utils.js'
 
 const CACHE_PREFIX = `${pluginName}:chat:`
 
@@ -111,19 +111,6 @@ function collectImageSegments(e) {
 }
 
 /**
- * 这条消息引用了哪条消息（QQ 的「引用回复」）。
- * 三个来源都试一遍：Yunzai 的 e.reply_id、e.source、以及消息段里的 reply 段。
- */
-function replyIdOf(e) {
-  if (!e) return ''
-  if (e.reply_id) return String(e.reply_id)
-  if (e.source && e.source.message_id) return String(e.source.message_id)
-  const segments = Array.isArray(e.message) ? e.message : []
-  const replySeg = segments.find((seg) => seg && seg.type === 'reply')
-  return replySeg && replySeg.id ? String(replySeg.id) : ''
-}
-
-/**
  * 取被引用那条消息里的图片。
  *
  * 为什么需要这个：QQ 里「引用一张图片」时，图片本身在【被引用】的消息里，
@@ -137,22 +124,13 @@ async function collectQuotedImageSegments(e, max) {
   const replyId = replyIdOf(e)
   if (!replyId || max <= 0) return []
 
-  try {
-    const recent = e.isGroup
-      ? await e.group.getChatHistory(0, 30)
-      : await e.friend.getChatHistory(0, 30)
-
-    const quoted = (recent || []).find((msg) => String(msg?.message_id) === replyId)
-    if (!quoted || !Array.isArray(quoted.message)) {
-      logger.info(`[${pluginName}] 引用了 ${replyId}，但最近 30 条里没找到这条消息，取不到引用里的图片`)
-      return []
-    }
-
-    return quoted.message.filter((seg) => seg && seg.type === 'image').slice(0, max)
-  } catch (error) {
-    logger.debug(`[${pluginName}] 读取被引用消息失败：${error.message || error}`)
+  const quoted = await findQuotedMessage(e)
+  if (!quoted || !Array.isArray(quoted.message)) {
+    logger.info(`[${pluginName}] 引用了 ${replyId}，但最近 30 条里没找到这条消息，取不到引用里的图片`)
     return []
   }
+
+  return quoted.message.filter((seg) => seg && seg.type === 'image').slice(0, max)
 }
 
 /** 把文本消息统一成「发送者前缀 + 内容」 */

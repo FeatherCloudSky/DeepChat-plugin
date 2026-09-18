@@ -401,6 +401,44 @@ export function supportGuoba() {
           component: 'GSelectGroup'
         },
 
+        // ---------------------------------------------------------- 海龟汤
+        { label: '海龟汤', component: 'SOFT_GROUP_BEGIN' },
+        {
+          field: 'soupEnable',
+          label: '启用汤面功能',
+          bottomHelpMessage: '关闭后 #汤面 和 #删除汤面 都不再响应（已记下的汤面会留到过期）',
+          component: 'Switch'
+        },
+        {
+          field: 'soupExpireHours',
+          label: '汤面保存时长（小时）',
+          bottomHelpMessage: '默认 24。到点自动删除；期间发 #汤面 可以随时再看',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 720 }
+        },
+        {
+          field: 'soupMaxImages',
+          label: '汤面最多保存几张图',
+          bottomHelpMessage: '默认 3，填 0 表示只收文字。图片会下载到插件的 data/soup/ 里存着' +
+            '（QQ 的图片地址过一阵就失效，只存链接放不到一天），过期或删除时自动清掉',
+          component: 'InputNumber',
+          componentProps: { min: 0, max: 9 }
+        },
+        {
+          field: 'soupRefreshOnView',
+          label: '查看时重新计时',
+          bottomHelpMessage: '关闭（默认）：从记录那一刻起算，满「保存时长」就过期。' +
+            '打开：每次发 #汤面 都把过期时间往后顺延一次',
+          component: 'Switch'
+        },
+        {
+          field: 'soupAllowMember',
+          label: '允许普通成员使用',
+          bottomHelpMessage: '默认开。汤面属于会话，不是发汤面那个人的私产——谁引用它都能记、都能删。' +
+            '关掉后只有主人 / 管理员能记录和删除，查看不受影响',
+          component: 'Switch'
+        },
+
         // ---------------------------------------------------------- 群发消息
         { label: '群发消息', component: 'SOFT_GROUP_BEGIN' },
         {

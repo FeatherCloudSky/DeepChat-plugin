@@ -176,3 +176,51 @@ export function firstDefined(...values) {
   }
   return undefined
 }
+
+/**
+ * 这条消息引用了哪条消息（QQ 的「引用回复」）。
+ * 三个来源都试一遍：Yunzai 的 e.reply_id、e.source、以及消息段里的 reply 段。
+ */
+export function replyIdOf(e) {
+  if (!e) return ''
+  if (e.reply_id) return String(e.reply_id)
+  if (e.source && e.source.message_id) return String(e.source.message_id)
+  const segments = Array.isArray(e.message) ? e.message : []
+  const replySeg = segments.find((seg) => seg && seg.type === 'reply')
+  return replySeg && replySeg.id ? String(replySeg.id) : ''
+}
+
+/**
+ * 按 id 找出被引用的那条消息（拿到的是原始消息段数组）。
+ *
+ * 为什么需要这个：QQ 里「引用一条消息」时，被引用的文字和图片都在**那条**消息里，
+ * 当前消息只带一个 reply 段，直接看 e.message 是看不到内容的。
+ *
+ * icqq 没有按 id 取单条消息的接口（Group/Friend 只有 getChatHistory 和 recallMsg），
+ * 所以只能翻最近的聊天记录把它找出来。引用的通常都是刚看过的消息，够用。
+ *
+ * @param {number[]} windows 依次尝试的翻页条数。翻记录有成本，先试小的再试大的。
+ * @returns {Promise<object|null>} 被引用的消息，找不到返回 null
+ */
+export async function findQuotedMessage(e, windows = [30]) {
+  const replyId = replyIdOf(e)
+  if (!replyId) return null
+
+  const target = e?.isGroup ? e?.group : e?.friend
+  if (typeof target?.getChatHistory !== 'function') return null
+
+  for (const count of windows) {
+    if (!(count > 0)) continue
+    let recent = null
+    try {
+      recent = await target.getChatHistory(0, count)
+    } catch (error) {
+      logger.debug(`[utils] 读取被引用消息失败：${error.message || error}`)
+      return null
+    }
+    const hit = (recent || []).find((msg) => String(msg?.message_id) === replyId)
+    if (hit) return hit
+  }
+
+  return null
+}
