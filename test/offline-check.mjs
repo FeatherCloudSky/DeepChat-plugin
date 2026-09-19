@@ -990,9 +990,8 @@ console.log('\n=== 6.6 帮助出图与兜底 ===')
   okHelp.e = okEvent
   await okHelp.help(okEvent)
 
-  // 发图必须走「图片段」：裸 Buffer 在 OneBot 系适配器上会被丢掉
-  check('出图成功时发的是图片段', okEvent.__raw[0]?.type, 'image')
-  check('图片段里装的是渲染结果', okEvent.__raw[0]?.data?.file, 'BASE64_IMAGE_DATA')
+  // 发图用 e.reply(渲染结果) —— TRSS 渲染器自己的发法，实测这条能出图
+  check('出图成功时发的是渲染结果', okEvent.__replied[0], 'BASE64_IMAGE_DATA')
   check('传给渲染器的插件名 = 文件夹名', captured?.plugin, 'DeepChat-plugin')
   check('传给渲染器的模板相对路径', captured?.tplPath, 'help/index')
   // 关键：默认模式下渲染器即使截图失败也返回 true，

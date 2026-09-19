@@ -3,7 +3,6 @@ import { pathToFileURL } from 'node:url'
 import Cfg from '../model/Cfg.js'
 import HelpContent from '../model/HelpContent.js'
 import render from '../model/render.js'
-import { replyImage } from '../model/message.js'
 import { pluginName, pluginResources } from '../config/constant.js'
 import { isBlank } from '../model/utils.js'
 
@@ -62,14 +61,14 @@ export class help extends plugin {
   async help(e = this.e) {
     const content = HelpContent.loadHelp()
 
-    // 优先出图。render() 成功时返回图片字节，失败返回 null，
+    // 优先出图。render() 成功时返回图片数据，失败返回 null，
     // 所以「截图失败」这种情况能真的兜住，而不是静默什么都不回。
-    // 发图统一走 replyImage（消息段），裸 Buffer 在 OneBot 系适配器上会被丢掉。
+    // 发图就用 e.reply 直接发渲染结果 —— 这是 TRSS 渲染器自己的发法，
+    // 实测在 OneBot v11 / NapCat 上也是这条能出图。
     const image = await render('help/index', this.buildRenderData(content), { e, scale: 1.15 })
     if (image) {
-      const sent = typeof e?.reply === 'function' ? await replyImage(e, image) : { ok: false }
-      if (sent.ok) return true
-      logger.warn(`[${pluginName}] 帮助图发不出去（${sent.error || '未知原因'}），改发纯文本`)
+      if (typeof e?.reply === 'function') return e.reply(image)
+      return this.reply(image)
     }
 
     const text = HelpContent.toPlainText(content)
