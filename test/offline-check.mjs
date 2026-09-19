@@ -1412,13 +1412,65 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   check('只有 URL 的图会被下载下来', remoteMeta?.images?.[0]?.bytes, 9)
   check('扩展名按 content-type 走', remoteMeta?.images?.[0]?.name?.endsWith('.webp'), true)
 
-  const internalRecord = quote({
-    message_id: 'soup-internal',
-    message: [{ type: 'image', url: 'http://127.0.0.1/a.png' }, { type: 'text', text: '汤面在这' }]
+  // 适配器用本机端口供图（NapCat / Lagrange 一类很常见）：必须能拉下来，
+  // 不能按「非公网」一刀切挡掉 —— 那正是「图片汤面存不下」的成因
+  const pngBytes = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from('LOCALPORT')
+  ])
+  globalThis.fetch = async () => new Response(pngBytes, {
+    status: 200, headers: { 'content-type': 'application/octet-stream' }
   })
-  await soupApp.soup(internalRecord)
-  check('非公网图片被跳过，文字照常记', Soup.get(internalRecord)?.text, '汤面在这')
-  check('被跳过的图不会留在汤面里', Soup.get(internalRecord)?.images?.length, 0)
+  const localPortRecord = quote({ message_id: 'soup-local', message: [{ type: 'image', url: 'http://127.0.0.1:3000/img.jpg' }] })
+  await soupApp.soup(localPortRecord)
+  const localPortMeta = Soup.get(localPortRecord)
+  globalThis.fetch = originalFetch
+  check('本机端口供的图能拉下来', localPortMeta?.images?.length, 1)
+  check('类型按文件头认，不看扩展名', localPortMeta?.images?.[0]?.name?.endsWith('.png'), true)
+
+  // 下载失败：文字照常记，而且要把原因说出来
+  globalThis.fetch = async () => new Response('nope', { status: 404 })
+  const brokenRecord = quote({
+    message_id: 'soup-broken',
+    message: [{ type: 'image', url: 'https://example.com/gone.jpg' }, { type: 'text', text: '汤面在这' }]
+  })
+  await soupApp.soup(brokenRecord)
+  globalThis.fetch = originalFetch
+  check('下载失败时文字照常记', Soup.get(brokenRecord)?.text, '汤面在这')
+  checkTrue('下载失败会把原因说出来', /图片下载失败/.test(brokenRecord.__replied[0] || ''))
+  check('失败的那张不会留在汤面里', Soup.get(brokenRecord)?.images?.length, 0)
+
+  // 云元数据地址：仍然挡掉（SSRF），同样给出原因
+  const metaRecord = quote({
+    message_id: 'soup-meta',
+    message: [{ type: 'image', url: 'http://169.254.169.254/latest/meta-data/' }, { type: 'text', text: '汤面在这' }]
+  })
+  await soupApp.soup(metaRecord)
+  check('元数据地址被挡下，文字照常记', Soup.get(metaRecord)?.text, '汤面在这')
+  check('被挡下的图不会留在汤面里', Soup.get(metaRecord)?.images?.length, 0)
+
+  // 适配器只给了相对路径，也要找得到
+  const relRecord = quote({
+    message_id: 'soup-rel',
+    message: [{ type: 'image', file: path.relative(process.cwd(), fixture) }]
+  })
+  await soupApp.soup(relRecord)
+  check('相对路径的图也能读到', Soup.get(relRecord)?.images?.length, 1)
+
+  // 宿主不认 Buffer 时，退回 base64:// 再发一次
+  {
+    const fallbackEvent = evt()
+    const raw = []
+    let calls = 0
+    fallbackEvent.reply = (msg) => {
+      calls++
+      raw.push(msg)
+      if (calls === 2) return Promise.reject(new Error('不支持 Buffer'))
+      return Promise.resolve({ message_id: 9 })
+    }
+    await soupApp.show(fallbackEvent, Soup.get(relRecord))
+    checkTrue('Buffer 发图失败后退回 base64', String(raw[2] || '').startsWith('base64://'))
+  }
 
   // ---- 删除
   const del = evt()

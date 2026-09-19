@@ -17,7 +17,7 @@ import Cfg from '../model/Cfg.js'
 import Permission from '../model/Permission.js'
 import { getBuffer } from '../model/http.js'
 import { pluginName } from '../config/constant.js'
-import { findQuotedMessage, isPublicHttpUrl } from '../model/utils.js'
+import { findQuotedMessage } from '../model/utils.js'
 
 /** 单张汤面图片的体积上限，超过就不收，避免有人往磁盘里塞大文件 */
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -54,6 +54,76 @@ function leftText(ms) {
   return `${minutes} 分`
 }
 
+/** 按文件头认图片类型 —— 适配器给的临时文件常叫 xxx.image，看扩展名会猜错 */
+function sniffImage(buffer) {
+  if (!Buffer.isBuffer(buffer)) return ''
+  const head = buffer.subarray(0, 12)
+  if (head.length >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return '.png'
+  if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return '.jpg'
+  if (head.length >= 6 && head.subarray(0, 6).toString('latin1').startsWith('GIF8')) return '.gif'
+  if (head.length >= 12 && head.subarray(0, 4).toString('latin1') === 'RIFF' &&
+      head.subarray(8, 12).toString('latin1') === 'WEBP') return '.webp'
+  if (head.length >= 2 && head[0] === 0x42 && head[1] === 0x4d) return '.bmp'
+  return ''
+}
+
+/** 读本机图片：适配器给的可能是绝对路径、相对路径，或者只有一个文件名 */
+function readLocalImage(raw) {
+  const candidates = [raw]
+  if (!path.isAbsolute(raw)) {
+    candidates.push(path.resolve(process.cwd(), raw))
+    candidates.push(path.resolve(process.cwd(), 'data', raw))
+  }
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue
+      const stat = fs.statSync(candidate)
+      if (!stat.isFile() || stat.size === 0 || stat.size > MAX_IMAGE_BYTES) continue
+      return fs.readFileSync(candidate)
+    } catch (error) {
+      // 换下一个候选路径继续试
+    }
+  }
+  return null
+}
+
+/** 这些地址不给拉：云厂商的元数据服务，SSRF 最经典的目标 */
+const BLOCKED_IMAGE_HOSTS = new Set([
+  '100.100.100.200',            // 阿里云元数据
+  '169.254.169.254',            // AWS / GCP / Azure 元数据
+  'metadata.google.internal',
+  'metadata.tencentyun.com'
+])
+
+/**
+ * 汤面图必须真拉下来（要放 24 小时，只存 URL 撑不到），所以这里比
+ * 「给模型看的图」宽一档：**允许 127.0.0.1 和内网地址**。
+ *
+ * 原因：不少适配器（OneBot 系的 NapCat、Lagrange 等）是拿本机的一个 HTTP
+ * 端口供图的，地址就是 http://127.0.0.1:xxxx/xxx.jpg。按「只收公网」的规矩
+ * 会把这整类图挡掉，表现就是「图片汤面存不下来」。
+ *
+ * 仍然挡：非 http(s) 协议、链路本地 / 组播地址、以及上面那几个元数据地址。
+ */
+function isFetchableImageUrl(value) {
+  let url
+  try {
+    url = new URL(String(value ?? ''))
+  } catch (error) {
+    return false
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+
+  const host = url.hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
+  if (!host) return false
+  if (BLOCKED_IMAGE_HOSTS.has(host)) return false
+  if (/^169\.254\./.test(host)) return false        // IPv4 链路本地
+  if (/^fe80:/i.test(host)) return false            // IPv6 链路本地
+  if (/^ff/i.test(host)) return false               // 组播
+  if (/^(0|22[4-9]|23\d|24\d|25[0-5])\./.test(host)) return false
+  return true
+}
+
 /**
  * 把被引用消息里的一个图片段变成字节。
  *
@@ -61,54 +131,83 @@ function leftText(ms) {
  *   1. 适配器已经把图落成临时文件 —— 直接读，最稳；
  *   2. 只有 http(s) 地址 —— 服务端去拉。
  *
- * 第 2 条是服务端发起的请求，而地址来自群消息（不可信输入），
- * 所以先过一遍公网判定，别让人拿这个当跳板去戳内网。
+ * 第 2 条是服务端发起的请求，地址来自群消息，所以要过一遍
+ * isFetchableImageUrl：本机 / 内网放行（适配器常这么供图），
+ * 云元数据那类地址挡掉。
  */
 async function segmentImage(segment) {
-  const localPath = !isHttpUrl(segment?.file) ? String(segment?.file ?? '') : ''
-  if (localPath) {
-    try {
-      if (fs.existsSync(localPath)) {
-        const buffer = fs.readFileSync(localPath)
-        if (buffer.length > 0 && buffer.length <= MAX_IMAGE_BYTES) {
-          return { data: buffer, ext: guessExt(localPath), url: String(segment?.url ?? ''), mediaType: '' }
-        }
-        logger.warn(`[${pluginName}] 汤面图片体积不合适（${buffer.length} 字节），已跳过`)
-        return null
+  const fileField = String(segment?.file ?? '')
+  const urlField = String(segment?.url ?? '')
+  const url = isHttpUrl(urlField) ? urlField : (isHttpUrl(fileField) ? fileField : '')
+  const localRaw = fileField && !isHttpUrl(fileField) ? fileField : ''
+
+  if (localRaw) {
+    const buffer = readLocalImage(localRaw)
+    if (buffer) {
+      return {
+        ok: true,
+        data: buffer,
+        ext: sniffImage(buffer) || guessExt(localRaw),
+        url,
+        mediaType: '',
+        from: '本机文件'
       }
-    } catch (error) {
-      logger.debug(`[${pluginName}] 读取本地汤面图片失败：${error.message || error}`)
     }
   }
 
-  const url = isHttpUrl(segment?.url) ? String(segment.url) : (isHttpUrl(segment?.file) ? String(segment.file) : '')
   if (!url) {
     const fieldNames = Object.keys(segment || {}).filter((k) => segment[k]).join(', ')
     logger.warn(`[${pluginName}] 汤面图片段里没有可用地址。该段带有的字段：${fieldNames || '(空)'}`)
-    return null
+    return { ok: false, reason: '这条消息里的图片既没有本机文件也没有下载地址' }
   }
 
-  if (!isPublicHttpUrl(url)) {
-    logger.warn(`[${pluginName}] 汤面图片地址不是公网 http(s)，已跳过：${url}`)
-    return null
+  if (!isFetchableImageUrl(url)) {
+    logger.warn(`[${pluginName}] 汤面图片地址被安全规则挡下，已跳过：${url}`)
+    return { ok: false, reason: '图片地址指向的是云元数据之类的特殊地址，出于安全没有去拉' }
   }
 
   try {
     const result = await getBuffer(url, 15000, MAX_IMAGE_BYTES)
     if (!result.ok || !result.buffer?.length) {
-      logger.warn(`[${pluginName}] 下载汤面图片失败，HTTP ${result.status ?? '?'}`)
-      return null
+      logger.warn(`[${pluginName}] 下载汤面图片失败，HTTP ${result.status ?? '?'}：${url}`)
+      return { ok: false, reason: `图片下载失败（HTTP ${result.status ?? '?'}）` }
     }
     return {
+      ok: true,
       data: result.buffer,
-      ext: guessExt(url, result.contentType),
+      ext: sniffImage(result.buffer) || guessExt(url, result.contentType),
       url,
-      mediaType: String(result.contentType || '').split(';')[0].trim()
+      mediaType: String(result.contentType || '').split(';')[0].trim(),
+      from: '下载'
     }
   } catch (error) {
     logger.warn(`[${pluginName}] 下载汤面图片失败：${error.message || error}`)
-    return null
+    return { ok: false, reason: '图片下载失败' }
   }
+}
+
+/**
+ * 把存下来的图发出去。
+ *
+ * 首选 Buffer —— Yunzai 自己的渲染器就是这么发图的，是生态里最通用的一条路。
+ * 万一这条不行，再退到 base64:// 字符串；都不行就把原地址发出来，
+ * 至少让人知道图是什么，而不是什么都没有。
+ */
+async function sendImage(e, buffer, image) {
+  try {
+    await e.reply(buffer)
+    return true
+  } catch (error) {
+    logger.warn(`[${pluginName}] 用 Buffer 发汤面图片失败，改用 base64 再试：${error.message || error}`)
+  }
+  try {
+    await e.reply(`base64://${buffer.toString('base64')}`)
+    return true
+  } catch (error) {
+    logger.warn(`[${pluginName}] base64 发汤面图片也失败：${error.message || error}`)
+  }
+  if (image?.url) await e.reply(`（这张图发不出来，原地址：${image.url}）`)
+  return false
 }
 
 /** 把一条消息的段拆成「文字 + 图片段」 */
@@ -184,23 +283,32 @@ export class soup extends plugin {
     const imageSegments = max > 0 ? segments.filter((seg) => seg?.type === 'image').slice(0, max) : []
 
     const images = []
+    const skipped = []
     for (const segment of imageSegments) {
-      const image = await segmentImage(segment)
-      if (image) images.push(image)
+      const result = await segmentImage(segment)
+      if (result.ok) images.push(result)
+      else skipped.push(result.reason)
     }
 
     if (!text && images.length === 0) {
       return e.reply(
-        '被引用的那条消息里没有能保存的文字或图片。\n' +
-        (max <= 0 ? '（当前「汤面最多保存几张图」是 0，只收文字）' : '（图片也可能没下载下来，可以看日志确认）')
+        '被引用的那条消息里没有能保存的内容。\n' +
+        (max <= 0
+          ? '（当前「汤面最多保存几张图」是 0，只收文字）'
+          : `（图片：${skipped[0] || '这条消息里没找到图片'}）`)
       )
     }
 
     const meta = Soup.save(e, { text, images })
+    logger.mark(
+      `[${pluginName}] 汤面已记录：文字 ${text.length} 字、图片 ${meta.images.length} 张` +
+      (images.length > 0 ? `（图片来自${[...new Set(images.map((i) => i.from))].join('/')}）` : '')
+    )
 
+    // 哪张图没存下、为什么，直接说出来 —— 不然「图片汤面看不了」只能靠猜
+    const note = skipped.length > 0 ? `（${skipped.length} 张图没存下：${skipped[0]}）` : ''
     await e.reply(
-      `已记录 ${meta.label} 的汤面` +
-      (imageSegments.length > images.length ? `（${imageSegments.length} 张图里成功存下 ${images.length} 张）` : '') + '。\n' +
+      `已记录 ${meta.label} 的汤面${note}。\n` +
       `过期时间：${fmtTime(meta.expiresAt)}（约 ${leftText(meta.expiresAt - Date.now())}后）\n` +
       '之后发 #汤面 可以再看，发 #删除汤面 就删掉。'
     )
@@ -208,7 +316,7 @@ export class soup extends plugin {
     // 顺手回一份图，让人确认存下来的正是这张
     for (const image of meta.images) {
       const buffer = Soup.imageBuffer(meta, image)
-      if (buffer) await e.reply(buffer)
+      if (buffer) await sendImage(e, buffer, image)
     }
     return true
   }
@@ -229,7 +337,7 @@ export class soup extends plugin {
 
     for (const image of meta.images) {
       const buffer = Soup.imageBuffer(meta, image)
-      if (buffer) { await e.reply(buffer); continue }
+      if (buffer) { await sendImage(e, buffer, image); continue }
       if (image.url) await e.reply(`（有一张图在本地找不到了，原地址：${image.url}）`)
     }
     return true
