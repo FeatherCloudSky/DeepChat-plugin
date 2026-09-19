@@ -16,6 +16,7 @@ import Soup from '../model/Soup.js'
 import Cfg from '../model/Cfg.js'
 import Permission from '../model/Permission.js'
 import { getBuffer } from '../model/http.js'
+import { replyImage } from '../model/message.js'
 import { pluginName } from '../config/constant.js'
 import { findQuotedMessage } from '../model/utils.js'
 
@@ -188,28 +189,16 @@ async function segmentImage(segment) {
   }
 }
 
-/**
- * 把存下来的图发出去。
- *
- * 首选 Buffer —— Yunzai 自己的渲染器就是这么发图的，是生态里最通用的一条路。
- * 万一这条不行，再退到 base64:// 字符串；都不行就把原地址发出来，
- * 至少让人知道图是什么，而不是什么都没有。
- */
+/** 发汤面图：走统一的图片段写法；实在发不出去就把原地址发出来 */
 async function sendImage(e, buffer, image) {
-  try {
-    await e.reply(buffer)
-    return true
-  } catch (error) {
-    logger.warn(`[${pluginName}] 用 Buffer 发汤面图片失败，改用 base64 再试：${error.message || error}`)
-  }
-  try {
-    await e.reply(`base64://${buffer.toString('base64')}`)
-    return true
-  } catch (error) {
-    logger.warn(`[${pluginName}] base64 发汤面图片也失败：${error.message || error}`)
-  }
+  if (await replyImage(e, buffer)) return true
   if (image?.url) await e.reply(`（这张图发不出来，原地址：${image.url}）`)
   return false
+}
+
+/** 存下来的字节看着不像图片时，把这件事说出来，别让人对着空白猜 */
+function describeSuspectFormat(buffer) {
+  return `（这张图存下来的内容不像是图片：${buffer.length} 字节。多半是当初没下载成功，重新记录一次汤面试试）`
 }
 
 /**
@@ -379,13 +368,20 @@ export class soup extends plugin {
     }
 
     const meta = Soup.save(e, { text, images })
+    const suspect = images.filter((img) => !sniffImage(img.data)).length
     logger.mark(
       `[${pluginName}] 汤面已记录：文字 ${text.length} 字、图片 ${meta.images.length} 张` +
-      (images.length > 0 ? `（图片来自${[...new Set(images.map((i) => i.from))].join('/')}）` : '')
+      (images.length > 0
+        ? `（来自${[...new Set(images.map((i) => i.from))].join('/')}；` +
+          `${images.map((i) => `${i.data.length} 字节 ${i.ext}`).join('、')}）`
+        : '')
     )
 
     // 哪张图没存下、为什么，直接说出来 —— 不然「图片汤面看不了」只能靠猜
-    const note = skipped.length > 0 ? `（${skipped.length} 张图没存下：${skipped[0]}）` : ''
+    const notes = []
+    if (skipped.length > 0) notes.push(`${skipped.length} 张图没存下：${skipped[0]}`)
+    if (suspect > 0) notes.push(`${suspect} 张图的字节不像是图片，可能没下到真图`)
+    const note = notes.length > 0 ? `（${notes.join('；')}）` : ''
     await e.reply(
       `已记录 ${meta.label} 的汤面${note}。\n` +
       `过期时间：${fmtTime(meta.expiresAt)}（约 ${leftText(meta.expiresAt - Date.now())}后）\n` +
@@ -416,8 +412,13 @@ export class soup extends plugin {
 
     for (const image of meta.images) {
       const buffer = Soup.imageBuffer(meta, image)
-      if (buffer) { await sendImage(e, buffer, image); continue }
-      if (image.url) await e.reply(`（有一张图在本地找不到了，原地址：${image.url}）`)
+      if (!buffer) {
+        if (image.url) await e.reply(`（有一张图在本地找不到了，原地址：${image.url}）`)
+        continue
+      }
+      // 先把「这字节不像图片」说出来：万一图发不出去，至少还有个线索
+      if (!sniffImage(buffer)) await e.reply(describeSuspectFormat(buffer))
+      await sendImage(e, buffer, image)
     }
     return true
   }

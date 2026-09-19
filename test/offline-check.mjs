@@ -515,9 +515,13 @@ checkTrue('#chat 加内容触发对话', matches(chatInstance, '#chat 你好'), 
 const mockEvent = (over = {}) => {
   const e = {
     isGroup: true, group_id: 123456, user_id: 10001, self_id: 999,
-    msg: '', message: [], sender: { nickname: '测试用户' }, __replied: []
+    msg: '', message: [], sender: { nickname: '测试用户' }, __replied: [], __raw: []
   }
-  e.reply = (msg) => { e.__replied.push(String(msg)); return Promise.resolve({ message_id: 1 }) }
+  e.reply = (msg) => {
+    e.__raw.push(msg)
+    e.__replied.push(String(msg))
+    return Promise.resolve({ message_id: 1 })
+  }
   return Object.assign(e, over)
 }
 
@@ -986,7 +990,9 @@ console.log('\n=== 6.6 帮助出图与兜底 ===')
   okHelp.e = okEvent
   await okHelp.help(okEvent)
 
-  check('出图成功时发的是图片 base64', okEvent.__replied[0], 'BASE64_IMAGE_DATA')
+  // 发图必须走「图片段」：裸 Buffer 在 OneBot 系适配器上会被丢掉
+  check('出图成功时发的是图片段', okEvent.__raw[0]?.type, 'image')
+  check('图片段里装的是渲染结果', okEvent.__raw[0]?.data?.file, 'BASE64_IMAGE_DATA')
   check('传给渲染器的插件名 = 文件夹名', captured?.plugin, 'DeepChat-plugin')
   check('传给渲染器的模板相对路径', captured?.tplPath, 'help/index')
   // 关键：默认模式下渲染器即使截图失败也返回 true，
@@ -1271,6 +1277,12 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   const soupApp = new soupMod.soup()
   soupApp.e = evt()
 
+  /** 一张「看起来像图片」的最小字节串（PNG 头 + 载荷），用来测落盘与回放 */
+  const pngBytes = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from('PNGDATA')
+  ])
+
   // ---- 引用关系：三种写法都要认
   check('引用 id：e.reply_id 优先', replyIdOf({ reply_id: 11, source: { message_id: 22 } }), '11')
   check('引用 id：退回 e.source', replyIdOf({ source: { message_id: 22 } }), '22')
@@ -1388,18 +1400,20 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   // ---- 图片汤面：本地临时文件 / 只有 URL / 内网地址
   fs.mkdirSync(Soup.dir, { recursive: true })
   const fixture = path.join(Soup.dir, 'fixture.png')
-  fs.writeFileSync(fixture, Buffer.from('LOCALIMG'))
+  fs.writeFileSync(fixture, pngBytes)
 
   const imgRecord = quote({ message_id: 'soup-img', message: [{ type: 'image', file: fixture }] })
   await soupApp.soup(imgRecord)
   checkTrue('引用图片也能记', /已记录/.test(imgRecord.__replied[0] || ''))
   check('图片汤面存下 1 张', Soup.get(imgRecord)?.images?.length, 1)
-  check('记录时回一份图确认', Buffer.isBuffer(imgRecord.__raw[1]), true)
+  check('记录时回一份图确认（走图片段）', imgRecord.__raw[1]?.type, 'image')
+  check('图片段里装的是字节', Buffer.isBuffer(imgRecord.__raw[1]?.data?.file), true)
 
   const imgView = evt()
   await soupApp.soup(imgView)
-  check('图片汤面查看时回的是图片', Buffer.isBuffer(imgView.__raw[1]), true)
-  check('回出来的字节和存的一致', imgView.__raw[1].toString(), 'LOCALIMG')
+  check('图片汤面查看时回的是图片段', imgView.__raw[1]?.type, 'image')
+  check('回出来的字节和存的一致',
+    imgView.__raw[1]?.data?.file?.toString('hex'), pngBytes.toString('hex'))
 
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => new Response(Buffer.from('REMOTEIMG'), {
@@ -1414,10 +1428,6 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
 
   // 适配器用本机端口供图（NapCat / Lagrange 一类很常见）：必须能拉下来，
   // 不能按「非公网」一刀切挡掉 —— 那正是「图片汤面存不下」的成因
-  const pngBytes = Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    Buffer.from('LOCALPORT')
-  ])
   globalThis.fetch = async () => new Response(pngBytes, {
     status: 200, headers: { 'content-type': 'application/octet-stream' }
   })
@@ -1457,19 +1467,48 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   await soupApp.soup(relRecord)
   check('相对路径的图也能读到', Soup.get(relRecord)?.images?.length, 1)
 
-  // 宿主不认 Buffer 时，退回 base64:// 再发一次
+  // 发图必须走「消息段」：OneBot v11（NapCat / Lagrange）只认段，
+  // 裸 Buffer 会被展开成没有 type 的对象丢掉 —— 表现就是「什么都没发出去」
   {
-    const fallbackEvent = evt()
+    const segMeta = Soup.save(evt(), { text: 'segment 测试', images: [{ data: pngBytes, ext: '.png' }] })
+
+    const segEvent = evt()
+    const seen = []
+    segEvent.reply = (msg) => { seen.push(msg); return Promise.resolve({ message_id: 10 }) }
+    globalThis.segment = { image: (file) => ({ type: 'image', file }) }
+    await soupApp.show(segEvent, segMeta)
+    delete globalThis.segment
+    check('有 segment 时优先用它发图', seen[1]?.type, 'image')
+    check('segment.image 收到的是图片字节', Buffer.isBuffer(seen[1]?.file), true)
+
+    const noSegEvent = evt()
+    await soupApp.show(noSegEvent, segMeta)
+    check('没有 segment 时用等价的图片段', noSegEvent.__raw[1]?.type, 'image')
+    check('图片段里放的是 Buffer', Buffer.isBuffer(noSegEvent.__raw[1]?.data?.file), true)
+  }
+
+  // 段对象都发不出去时，才退回裸 Buffer（icqq 系的老写法）
+  {
+    const fbMeta = Soup.save(evt(), { text: '回退测试', images: [{ data: pngBytes, ext: '.png' }] })
+    const fbEvent = evt()
     const raw = []
     let calls = 0
-    fallbackEvent.reply = (msg) => {
+    fbEvent.reply = (msg) => {
       calls++
       raw.push(msg)
-      if (calls === 2) return Promise.reject(new Error('不支持 Buffer'))
+      if (calls === 2) return Promise.reject(new Error('这个方式不行'))
       return Promise.resolve({ message_id: 9 })
     }
-    await soupApp.show(fallbackEvent, Soup.get(relRecord))
-    checkTrue('Buffer 发图失败后退回 base64', String(raw[2] || '').startsWith('base64://'))
+    await soupApp.show(fbEvent, fbMeta)
+    check('段对象发不出去时退回裸 Buffer', Buffer.isBuffer(raw[2]), true)
+  }
+
+  // 存下来的字节不像图片时，先把这件事说出来，别让人对着空白猜
+  {
+    const badMeta = Soup.save(evt(), { text: '坏图测试', images: [{ data: Buffer.from('NOTANIMAGE'), ext: '.jpg' }] })
+    const badEvent = evt()
+    await soupApp.show(badEvent, badMeta)
+    checkTrue('字节不像图片时给出提示', /不像是图片/.test(badEvent.__replied.join('\n')))
   }
 
   // 适配器把聊天记录给成 CQ 码字符串时，也要能认出里面的图片
@@ -1530,6 +1569,37 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   Cfg.set('soupEnable', true)
 
   fs.rmSync(fixture, { force: true })
+}
+
+// ============================================================ 6.11 发图统一入口
+console.log('\n=== 6.11 发图统一入口 ===')
+{
+  const { imageCandidates, replyImage } = await import(url('model/message.js'))
+  const bytes = Buffer.from('IMG')
+
+  // 没有 segment 全局时：等价的消息段在前，裸 Buffer 兜底
+  const plain = imageCandidates(bytes)
+  check('候选写法至少两条', plain.length >= 2, true)
+  check('第一条是图片段', plain[0].type, 'image')
+  check('图片段里装 Buffer', Buffer.isBuffer(plain[0].data.file), true)
+  check('最后一条兜底裸 Buffer', Buffer.isBuffer(plain[plain.length - 1]), true)
+
+  // 有 segment 全局时：优先用 segment.image
+  globalThis.segment = { image: (file) => ({ type: 'image', file }) }
+  const withSeg = imageCandidates(bytes)
+  delete globalThis.segment
+  check('有 segment 时排在第一位', withSeg[0].type, 'image')
+  check('segment.image 收到原始字节', withSeg[0].file, bytes)
+
+  // replyImage：第一次成功就不再往下试
+  const okEvent = { calls: 0, reply() { this.calls++; return Promise.resolve({}) } }
+  check('发图成功返回 true', await replyImage(okEvent, bytes), true)
+  check('成功时只发了一次', okEvent.calls, 1)
+
+  // 全都抛错时返回 false，交给调用方兜底
+  const failEvent = { calls: 0, reply() { this.calls++; return Promise.reject(new Error('不行')) } }
+  check('全都失败返回 false', await replyImage(failEvent, bytes), false)
+  check('失败时把候选写法都试了', failEvent.calls >= 2, true)
 }
 
 console.log('\n=== 7. 清理测试产生的文件 ===')
