@@ -8,9 +8,13 @@
  * 结构：
  * {
  *   "groups": { "123456": true, "234567": false },
- *   "users":  { "10001": false }
+ *   "users":  { "10001": false },
+ *   "groupPrompts": { "123456": 2 },
+ *   "userPrompts":  { "10001": 1 }
  * }
  * 未出现在这里的会话，走配置里的默认值 + 启用/禁用列表。
+ * 后两个桶存的是「这个会话用人设预设里的第几套」（#切换提示词），
+ * 没出现过就用面板里的默认人设。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -18,17 +22,21 @@ import { pluginData, pluginName } from '../config/constant.js'
 
 const STATE_FILE = path.join(pluginData, 'state.json')
 
-let state = { groups: {}, users: {} }
+let state = { groups: {}, users: {}, groupPrompts: {}, userPrompts: {} }
+
+const buckets = (parsed) => ({
+  groups: parsed?.groups && typeof parsed.groups === 'object' ? parsed.groups : {},
+  users: parsed?.users && typeof parsed.users === 'object' ? parsed.users : {},
+  groupPrompts: parsed?.groupPrompts && typeof parsed.groupPrompts === 'object' ? parsed.groupPrompts : {},
+  userPrompts: parsed?.userPrompts && typeof parsed.userPrompts === 'object' ? parsed.userPrompts : {}
+})
 
 function load() {
   try {
     if (!fs.existsSync(STATE_FILE)) return
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
     if (!parsed || typeof parsed !== 'object') return
-    state = {
-      groups: parsed.groups && typeof parsed.groups === 'object' ? parsed.groups : {},
-      users: parsed.users && typeof parsed.users === 'object' ? parsed.users : {}
-    }
+    state = buckets(parsed)
   } catch (error) {
     logger.warn(`[${pluginName}] 读取 state.json 失败：${error.message || error}`)
   }
@@ -52,6 +60,10 @@ function saveNow() {
 
 function bucket(e) {
   return e.isGroup ? state.groups : state.users
+}
+
+function promptBucket(e) {
+  return e.isGroup ? state.groupPrompts : state.userPrompts
 }
 
 function sessionKey(e) {
@@ -81,7 +93,25 @@ const ChatState = {
 
   /** 清空所有会话设置 */
   clearAll() {
-    state = { groups: {}, users: {} }
+    state = { groups: {}, users: {}, groupPrompts: {}, userPrompts: {} }
+    saveNow()
+  },
+
+  /** 本会话选中的第几套人设；没设过返回 null */
+  getPromptIndex(e) {
+    const index = Number(promptBucket(e)[sessionKey(e)])
+    return Number.isInteger(index) && index > 0 ? index : null
+  },
+
+  setPromptIndex(e, index) {
+    promptBucket(e)[sessionKey(e)] = Number(index)
+    saveNow()
+    return Number(index)
+  },
+
+  /** 清除本会话的人设选择，回到面板默认 */
+  clearPromptIndex(e) {
+    delete promptBucket(e)[sessionKey(e)]
     saveNow()
   },
 

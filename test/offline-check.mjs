@@ -1761,6 +1761,103 @@ console.log('\n=== 6.12 图片尺寸与上限 ===')
   check('没有渲染器时返回 null', await shrinkImage({}, bigPng, readImageSize(bigPng), limits), null)
 }
 
+// ============================================================ 6.13 人设预设与切换
+console.log('\n=== 6.13 人设预设与切换 ===')
+{
+  const Prompt = (await import(url('model/Prompt.js'))).default
+  const manageMod = await import(url('apps/manage.js'))
+  const manageApp = new manageMod.manage()
+  const ChatState = (await import(url('model/ChatState.js'))).default
+
+  const evt = (over = {}) => mockEvent({ isGroup: true, group_id: 660011, user_id: 10001, ...over })
+
+  Cfg.set('prompt', '默认人设：普通猫娘')
+  Cfg.set('promptList', [
+    { title: '严肃助手', content: '你是严肃的助手。' },
+    { title: '猫粮推销员', content: '你是推销猫粮的。' },
+    { title: '', content: '' }
+  ])
+  Cfg.set('masterQQ', '10001')
+  Cfg.set('adminQQ', [])
+
+  const list = Prompt.presetList()
+  check('预设列表：过滤掉空行', list.length, 2)
+  check('预设列表：序号从 1 开始', list.map((p) => p.index), [1, 2])
+  check('预设列表：带出名字', list.map((p) => p.title), ['严肃助手', '猫粮推销员'])
+  check('面板没配时列表为空', (() => {
+    Cfg.set('promptList', [])
+    const empty = Prompt.presetList().length
+    Cfg.set('promptList', [
+      { title: '严肃助手', content: '你是严肃的助手。' },
+      { title: '猫粮推销员', content: '你是推销猫粮的。' },
+      { title: '', content: '' }
+    ])
+    return empty
+  })(), 0)
+
+  check('按序号找人设', Prompt.findPreset('2')?.title, '猫粮推销员')
+  check('按名字找人设', Prompt.findPreset('严肃助手')?.index, 1)
+  check('名字可以部分匹配', Prompt.findPreset('推销')?.index, 2)
+  check('找不到返回 null', Prompt.findPreset('不存在的人设'), null)
+
+  const plain = evt()
+  check('没切过时用面板默认', Prompt.activePrompt(plain).from, '面板默认')
+  check('默认人设内容正确', Prompt.activePrompt(plain).content, '默认人设：普通猫娘')
+
+  const notMaster = evt({ user_id: 20002 })
+  await manageApp.switchPrompt(notMaster)
+  checkTrue('非主人不能切换人设', /只有主人/.test(notMaster.__replied[0] || ''))
+
+  const byIndex = evt({ msg: '#切换提示词1' })
+  await manageApp.switchPrompt(byIndex)
+  checkTrue('主人按序号切换', /人设 1\. 严肃助手/.test(byIndex.__replied[0] || ''))
+  check('切换后立刻生效', Prompt.activePrompt(byIndex).content, '你是严肃的助手。')
+  check('选择写进了会话状态', ChatState.getPromptIndex(byIndex), 1)
+
+  const byName = evt({ msg: '#切换提示词 猫粮推销员' })
+  await manageApp.switchPrompt(byName)
+  check('也可以按名字切换', Prompt.activePrompt(byName).title, '猫粮推销员')
+
+  const missing = evt({ msg: '#切换提示词9' })
+  await manageApp.switchPrompt(missing)
+  checkTrue('序号不存在时给出提示', /没找到人设/.test(missing.__replied[0] || ''))
+
+  const bare = evt({ msg: '#切换提示词' })
+  await manageApp.switchPrompt(bare)
+  checkTrue('不带参数时列出人设', /严肃助手/.test(bare.__replied[0] || ''))
+
+  const back = evt({ msg: '#切换提示词0' })
+  await manageApp.switchPrompt(back)
+  check('切回默认后不再有会话选择', ChatState.getPromptIndex(back), null)
+  check('回到面板默认人设', Prompt.activePrompt(back).content, '默认人设：普通猫娘')
+
+  // 并行：不同会话各用各的
+  const groupA = evt({ group_id: 660011 })
+  const groupB = evt({ group_id: 660012 })
+  ChatState.setPromptIndex(groupA, 1)
+  ChatState.setPromptIndex(groupB, 2)
+  check('A 群用人设 1', Prompt.activePrompt(groupA).title, '严肃助手')
+  check('B 群同时用人设 2', Prompt.activePrompt(groupB).title, '猫粮推销员')
+
+  const listEvent = evt()
+  await manageApp.promptList(listEvent)
+  checkTrue('列表能看到全部人设', /严肃助手/.test(listEvent.__replied[0] || ''))
+  checkTrue('列表标出当前用的是哪套', /←当前/.test(listEvent.__replied[0] || ''))
+
+  const notMasterList = evt({ user_id: 20002 })
+  await manageApp.promptList(notMasterList)
+  checkTrue('非主人也看不了列表', /只有主人/.test(notMasterList.__replied[0] || ''))
+
+  // 真正发给模型的那段系统提示词，用的是选中的那套
+  const sysMsg = chatInstance.buildSystemMessage(evt({ group_id: 660011 }), 'active')
+  checkTrue('系统提示词用上选中的人设', /你是严肃的助手。/.test(sysMsg.content))
+  checkTrue('系统提示词标出人设名', /（严肃助手）/.test(sysMsg.content))
+
+  Cfg.set('promptList', [])
+  Cfg.set('masterQQ', '')
+  ChatState.clearAll()
+}
+
 console.log('\n=== 7. 清理测试产生的文件 ===')
 const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json', 'data/soup', 'data/tmp']
 for (const rel of leftovers) {

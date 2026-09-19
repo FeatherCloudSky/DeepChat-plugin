@@ -157,6 +157,32 @@ export function supportGuoba() {
           componentProps: { rows: 6, placeholder: '你是一只可爱的猫娘……' }
         },
         {
+          field: 'promptList',
+          label: '人设预设（可多套）',
+          bottomHelpMessage: '一次配好几套人设，主人用「#切换提示词1」这类命令给**当前会话**切换；' +
+            '不同群可以同时用不同人设。没切换过的会话用上面那份默认人设。' +
+            '「#切换提示词0」回到默认，「#提示词列表」看有哪些',
+          component: 'GSubForm',
+          componentProps: {
+            multiple: true,
+            schemas: [
+              {
+                field: 'title',
+                label: '名称',
+                component: 'Input',
+                required: true,
+                componentProps: { placeholder: '猫娘 / 严肃助手 / 猫粮推销员……' }
+              },
+              {
+                field: 'content',
+                label: '人设内容',
+                component: 'InputTextArea',
+                componentProps: { rows: 4, placeholder: '你是一只……' }
+              }
+            ]
+          }
+        },
+        {
           field: 'aiName',
           label: 'AI 名称',
           bottomHelpMessage: '消息里任意位置出现这个词就触发回复，不需要 @。例如填「达达利亚」，「不知道达达利亚圣遗物带什么好」也会触发',

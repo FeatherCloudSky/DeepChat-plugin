@@ -2,6 +2,7 @@ import ChatState from '../model/ChatState.js'
 import Policy from '../model/Policy.js'
 import Provider from '../model/Provider.js'
 import Permission from '../model/Permission.js'
+import Prompt from '../model/Prompt.js'
 import Cfg from '../model/Cfg.js'
 import { pluginName } from '../config/constant.js'
 
@@ -18,7 +19,10 @@ export class manage extends plugin {
         { reg: '^#chat关$', fnc: 'disable' },
         { reg: '^#chat重置$', fnc: 'reset' },
         { reg: '^#chat状态$', fnc: 'status' },
-        { reg: '^#chat全开$', fnc: 'resetAll' }
+        { reg: '^#chat全开$', fnc: 'resetAll' },
+        // 人设切换：只有主人能动（见 switchPrompt 里的判定）
+        { reg: '^[#＃]\\s*切换提示词\\s*\\S*\\s*$', fnc: 'switchPrompt' },
+        { reg: '^[#＃]\\s*提示词列表$', fnc: 'promptList' }
       ]
     })
   }
@@ -63,6 +67,37 @@ export class manage extends plugin {
     if (!Permission.isMaster(e)) return e.reply('只有主人才能执行这个操作。')
     ChatState.clearAll()
     return e.reply('已清空所有会话级开关，全部回到配置里的默认策略。')
+  }
+
+  /**
+   * 切换本会话的人设预设。只有主人能发（这条命令会改机器人的说话方式，
+   * 不该让管理员或群友随手改）。
+   */
+  async switchPrompt(e) {
+    if (!Permission.isMaster(e)) return e.reply('只有主人才能切换人设。')
+
+    const arg = String(e.msg || '').replace(/^[#＃]\s*切换提示词/, '').trim()
+    if (!arg) return e.reply(Prompt.describeList(e))
+
+    if (arg === '0' || arg === '默认' || arg === '默认人设') {
+      ChatState.clearPromptIndex(e)
+      const { from } = Prompt.activePrompt(e)
+      return e.reply(`已把${this.sessionName(e)}的人设切回面板默认（来自${from}）。`)
+    }
+
+    const preset = Prompt.findPreset(arg)
+    if (!preset) return e.reply(`没找到人设「${arg}」。\n\n${Prompt.describeList(e)}`)
+
+    ChatState.setPromptIndex(e, preset.index)
+    return e.reply(
+      `已把${this.sessionName(e)}切换到人设 ${preset.index}. ${preset.title}。\n` +
+      '这个会话之后的回复都用这套人设；发 #切换提示词0 可以回到面板默认。'
+    )
+  }
+
+  async promptList(e) {
+    if (!Permission.isMaster(e)) return e.reply('只有主人才能查看人设列表。')
+    return e.reply(Prompt.describeList(e))
   }
 
   async status(e) {

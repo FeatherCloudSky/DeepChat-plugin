@@ -4,6 +4,7 @@ import Cfg from '../model/Cfg.js'
 import Provider from '../model/Provider.js'
 import Policy from '../model/Policy.js'
 import Permission from '../model/Permission.js'
+import Prompt from '../model/Prompt.js'
 import { getBuffer } from '../model/http.js'
 import { pluginName } from '../config/constant.js'
 import { splitReply, sleep, isBlank, isPublicHttpUrl, replyIdOf, findQuotedMessage } from '../model/utils.js'
@@ -533,8 +534,12 @@ export default class DeepChat extends plugin {
       )
     }
 
-    const prompt = Cfg.get('prompt', '')
-    if (prompt) lines.push('', '以下是你的人设设定：', prompt)
+    // 人设按会话取：主人可以用 #切换提示词1 给不同群并行配不同人设
+    const persona = Prompt.activePrompt(e)
+    if (persona.content) {
+      lines.push('', persona.title ? `以下是你的人设设定（${persona.title}）：` : '以下是你的人设设定：',
+        persona.content)
+    }
 
     return { role: 'system', content: lines.join('\n') }
   }

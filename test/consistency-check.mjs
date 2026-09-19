@@ -84,7 +84,7 @@ const guobaSrc = fs.readFileSync(path.join(pluginDir, 'guoba.support.js'), 'utf8
 const guobaFields = [...guobaSrc.matchAll(/field:\s*'([^']+)'/g)].map((m) => m[1])
 
 // GSubForm 的 schemas 里的字段是「列表的一行」，不是顶层配置键，排除掉
-const SUBFORM_FIELDS = new Set(['key', 'vision'])
+const SUBFORM_FIELDS = new Set(['key', 'vision', 'title', 'content'])
 const topFields = guobaFields.filter((f) => !SUBFORM_FIELDS.has(f))
 
 const guobaMissing = topFields.filter((f) => !(f in defaults))
