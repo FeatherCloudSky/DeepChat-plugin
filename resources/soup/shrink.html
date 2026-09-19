@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body { margin: 0; padding: 0; background: #fff; }
+    #container { display: inline-block; line-height: 0; }
+    #container img { display: block; width: {{width}}px; height: auto; }
+  </style>
+</head>
+<body>
+  <!-- 只做一件事：把原图按目标宽度显示出来，交给截图当缩放结果 -->
+  <div id="container"><img src="{{@src}}"></div>
+</body>
+</html>

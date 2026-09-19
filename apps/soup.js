@@ -17,11 +17,15 @@ import Cfg from '../model/Cfg.js'
 import Permission from '../model/Permission.js'
 import { getBuffer } from '../model/http.js'
 import { replyImage } from '../model/message.js'
+import { readImageSize, isOverLimit, shrinkImage } from '../model/image.js'
 import { pluginName } from '../config/constant.js'
 import { findQuotedMessage } from '../model/utils.js'
 
-/** 单张汤面图片的体积上限，超过就不收，避免有人往磁盘里塞大文件 */
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+/**
+ * 源图硬上限：超过这个数就不拉了，免得内存被顶爆。
+ * 拉回来之后按面板配置的上限（默认 20MB / 10000px）缩，缩不动才放弃。
+ */
+const SOURCE_HARD_CAP = 64 * 1024 * 1024
 
 /** 引用消息可能落在多远的记录里：先试 30 条，不够再翻 120 条 */
 const QUOTE_WINDOWS = [30, 120]
@@ -79,7 +83,7 @@ function readLocalImage(raw) {
     try {
       if (!fs.existsSync(candidate)) continue
       const stat = fs.statSync(candidate)
-      if (!stat.isFile() || stat.size === 0 || stat.size > MAX_IMAGE_BYTES) continue
+      if (!stat.isFile() || stat.size === 0 || stat.size > SOURCE_HARD_CAP) continue
       return fs.readFileSync(candidate)
     } catch (error) {
       // 换下一个候选路径继续试
@@ -170,7 +174,7 @@ async function segmentImage(segment) {
   }
 
   try {
-    const result = await getBuffer(url, 15000, MAX_IMAGE_BYTES)
+    const result = await getBuffer(url, 15000, SOURCE_HARD_CAP)
     if (!result.ok || !result.buffer?.length) {
       logger.warn(`[${pluginName}] 下载汤面图片失败，HTTP ${result.status ?? '?'}：${url}`)
       return { ok: false, reason: `图片下载失败（HTTP ${result.status ?? '?'}）` }
@@ -200,6 +204,48 @@ async function sendImage(e, buffer, image) {
       : `（这张图发不出去：${sent.error || '被协议端拒绝'}。如果别的插件发图也失败，多半是账号被限制发图了）`
   )
   return false
+}
+
+/** 单张图的体积上限（字节） */
+function maxImageBytes() {
+  return Cfg.getNumber('soupMaxImageMB', 20, 1, 256) * 1024 * 1024
+}
+
+/** 单边像素上限 */
+function maxImageSide() {
+  return Cfg.getNumber('soupMaxImageSide', 10000, 100, 50000)
+}
+
+/**
+ * 按面板配置卡一下图：超了就自动缩小，缩不动才放回一个「为什么」。
+ * @returns {Promise<{ok: boolean, image?: object, shrunk?: boolean, reason?: string}>}
+ */
+async function applyImageLimits(e, image) {
+  const maxBytes = maxImageBytes()
+  const maxSide = maxImageSide()
+  const size = readImageSize(image.data)
+
+  if (!isOverLimit(size, image.data.length, { maxSide, maxBytes })) {
+    return { ok: true, image, shrunk: false }
+  }
+
+  const describe = size?.width
+    ? `${size.width}×${size.height}、${(image.data.length / 1024 / 1024).toFixed(1)}MB`
+    : `${(image.data.length / 1024 / 1024).toFixed(1)}MB`
+
+  const shrunkImage = await shrinkImage(e, image.data, size, { maxSide, maxBytes })
+  if (!shrunkImage) {
+    return {
+      ok: false,
+      reason: `图片超过上限（${describe}，上限 ${maxSide}px / ${Cfg.getNumber('soupMaxImageMB', 20, 1, 256)}MB）`
+    }
+  }
+
+  return {
+    ok: true,
+    shrunk: true,
+    image: { ...image, data: shrunkImage.data, ext: shrunkImage.ext, from: `${image.from}+缩放` }
+  }
 }
 
 /** 存下来的字节看着不像图片时，把这件事说出来，别让人对着空白猜 */
@@ -358,10 +404,14 @@ export class soup extends plugin {
 
     const images = []
     const skipped = []
+    let shrunkCount = 0
     for (const segment of imageSegments) {
       const result = await segmentImage(segment)
-      if (result.ok) images.push(result)
-      else skipped.push(result.reason)
+      if (!result.ok) { skipped.push(result.reason); continue }
+      const limited = await applyImageLimits(e, result)
+      if (!limited.ok) { skipped.push(limited.reason); continue }
+      if (limited.shrunk) shrunkCount++
+      images.push(limited.image)
     }
 
     if (!text && images.length === 0) {
@@ -386,6 +436,7 @@ export class soup extends plugin {
     // 哪张图没存下、为什么，直接说出来 —— 不然「图片汤面看不了」只能靠猜
     const notes = []
     if (skipped.length > 0) notes.push(`${skipped.length} 张图没存下：${skipped[0]}`)
+    if (shrunkCount > 0) notes.push(`${shrunkCount} 张图超过上限，已自动缩小`)
     if (suspect > 0) notes.push(`${suspect} 张图的字节不像是图片，可能没下到真图`)
     const note = notes.length > 0 ? `（${notes.join('；')}）` : ''
     await e.reply(

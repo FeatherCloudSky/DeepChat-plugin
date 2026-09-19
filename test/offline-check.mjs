@@ -1542,6 +1542,45 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
     check('accept 不认领消息（不影响别的插件）', await soupApp.accept(evt({ msg: '#汤面' })), false)
   }
 
+  // 超限的图不要直接丢，先自动缩小再存（缩放借宿主渲染器）
+  {
+    const pngHead = (w, h) => {
+      const b = Buffer.alloc(33)
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0)
+      b.writeUInt32BE(13, 8)
+      b.write('IHDR', 12, 'latin1')
+      b.writeUInt32BE(w, 16)
+      b.writeUInt32BE(h, 20)
+      return b
+    }
+
+    Cfg.set('soupMaxImageMB', 1)
+    Cfg.set('soupMaxImageSide', 10000)
+
+    const bigFixture = path.join(Soup.dir, 'big.png')
+    fs.writeFileSync(bigFixture, Buffer.concat([pngHead(20000, 20000), Buffer.alloc(2 * 1024 * 1024)]))
+
+    let asked = null
+    const bigEvent = quote({ message_id: 'soup-big', message: [{ type: 'image', file: bigFixture }] })
+    bigEvent.runtime = {
+      render: async (plugin, tpl, params) => {
+        asked = { plugin, tpl, params }
+        return Buffer.alloc(512 * 1024)
+      }
+    }
+    await soupApp.soup(bigEvent)
+
+    checkTrue('超限图不会直接丢，而是缩小后存下', /已记录/.test(bigEvent.__replied[0] || ''))
+    checkTrue('回复里说明已自动缩小', /自动缩小/.test(bigEvent.__replied[0] || ''))
+    check('存下来的是缩小后的字节', Soup.get(bigEvent)?.images?.[0]?.bytes, 512 * 1024)
+    check('缩小时按单边上限给宽度', asked?.params?.width, 10000)
+    check('走的是缩放模板', asked?.tpl, 'soup/shrink')
+
+    fs.rmSync(bigFixture, { force: true })
+    Cfg.set('soupMaxImageMB', 20)
+    Cfg.set('soupMaxImageSide', 10000)
+  }
+
   // ---- 删除
   const del = evt()
   await soupApp.remove(del)
@@ -1624,8 +1663,106 @@ console.log('\n=== 6.11 发图统一入口 ===')
   check('返回 error 数组也算失败', (await replyImage(errResEvent, bytes)).ok, false)
 }
 
+// ============================================================ 6.12 图片尺寸与上限
+console.log('\n=== 6.12 图片尺寸与上限 ===')
+{
+  const { readImageSize, isOverLimit, shrinkImage, normalizeExt } = await import(url('model/image.js'))
+
+  const pngHeader = (w, h) => {
+    const b = Buffer.alloc(33)
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0)
+    b.writeUInt32BE(13, 8)
+    b.write('IHDR', 12, 'latin1')
+    b.writeUInt32BE(w, 16)
+    b.writeUInt32BE(h, 20)
+    return b
+  }
+  const jpegHeader = (w, h) => {
+    const sof = Buffer.alloc(9)
+    sof[0] = 0xff; sof[1] = 0xc0; sof.writeUInt16BE(17, 2); sof[4] = 8
+    sof.writeUInt16BE(h, 5); sof.writeUInt16BE(w, 7)
+    return Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]), Buffer.alloc(14), sof])
+  }
+  const gifHeader = (w, h) => {
+    const b = Buffer.alloc(16)
+    b.write('GIF89a', 0, 'latin1')
+    b.writeUInt16LE(w, 6); b.writeUInt16LE(h, 8)
+    return b
+  }
+  const bmpHeader = (w, h) => {
+    const b = Buffer.alloc(30)
+    b.write('BM', 0, 'latin1')
+    b.writeInt32LE(w, 18); b.writeInt32LE(h, 22)
+    return b
+  }
+  const webpHeader = (w, h) => {
+    const b = Buffer.alloc(30)
+    b.write('RIFF', 0, 'latin1'); b.write('WEBP', 8, 'latin1'); b.write('VP8X', 12, 'latin1')
+    const wm = w - 1, hm = h - 1
+    b[24] = wm & 0xff; b[25] = (wm >> 8) & 0xff; b[26] = (wm >> 16) & 0xff
+    b[27] = hm & 0xff; b[28] = (hm >> 8) & 0xff; b[29] = (hm >> 16) & 0xff
+    return b
+  }
+
+  check('PNG 尺寸', readImageSize(pngHeader(1920, 1080)), { type: '.png', width: 1920, height: 1080 })
+  check('JPEG 尺寸', readImageSize(jpegHeader(800, 600)), { type: '.jpg', height: 600, width: 800 })
+  check('GIF 尺寸', readImageSize(gifHeader(320, 240)), { type: '.gif', width: 320, height: 240 })
+  check('BMP 尺寸', readImageSize(bmpHeader(64, 48)), { type: '.bmp', width: 64, height: 48 })
+  check('WebP 尺寸', readImageSize(webpHeader(4000, 3000)), { type: '.webp', width: 4000, height: 3000 })
+  check('认不出的格式返回 null', readImageSize(Buffer.from('NOTANIMAGE____')), null)
+  check('空 Buffer 不炸', readImageSize(Buffer.alloc(0)), null)
+
+  check('后缀归一化：jpeg→jpg', normalizeExt('image/jpeg'), '.jpg')
+  check('后缀归一化：认不出的清空', normalizeExt('image/avif'), '')
+
+  const limits = { maxSide: 10000, maxBytes: 20 * 1024 * 1024 }
+  check('正常图不超限', isOverLimit(readImageSize(pngHeader(1920, 1080)), 1024, limits), false)
+  check('单边超限', isOverLimit(readImageSize(pngHeader(12000, 100)), 1024, limits), true)
+  check('体积超限', isOverLimit(readImageSize(pngHeader(100, 100)), 21 * 1024 * 1024, limits), true)
+  check('尺寸认不出时只看体积', isOverLimit(null, 1024, limits), false)
+
+  // 缩放：借渲染器完成，模板收到的是本机文件 URL
+  const captured = []
+  const bigPng = Buffer.concat([pngHeader(20000, 20000), Buffer.alloc(2 * 1024 * 1024)])
+  const renderEvent = {
+    runtime: {
+      render: async (plugin, tpl, params, cfg) => {
+        captured.push({ plugin, tpl, params })
+        return Buffer.alloc(1024 * 1024)
+      }
+    }
+  }
+  const shrunk = await shrinkImage(renderEvent, bigPng, readImageSize(bigPng), limits)
+  check('超限图被缩到单边上限', shrunk?.width, 10000)
+  check('缩放走的是宿主渲染器', captured[0]?.tpl, 'soup/shrink')
+  check('模板拿到的是本机文件 URL', /^file:\/\//.test(String(captured[0]?.params?.src || '')), true)
+  check('缩放结果给的是 jpg/png 之一', ['.jpg', '.png'].includes(shrunk?.ext), true)
+
+  const tmpDir = path.join(pluginDir, 'data', 'tmp')
+  const leftovers = fs.existsSync(tmpDir)
+    ? fs.readdirSync(tmpDir).filter((f) => f.startsWith('shrink-')).length
+    : 0
+  check('缩放的临时文件用完就删', leftovers, 0)
+
+  // 体积还超就继续收，直到装得下
+  let rounds = 0
+  const retryEvent = {
+    runtime: {
+      render: async () => {
+        rounds++
+        return Buffer.alloc(rounds === 1 ? 30 * 1024 * 1024 : 1024 * 1024)
+      }
+    }
+  }
+  const retried = await shrinkImage(retryEvent, bigPng, readImageSize(bigPng), limits)
+  check('体积还超就再缩一轮', rounds, 2)
+  check('第二轮成功后返回结果', retried?.width, 7500)
+
+  check('没有渲染器时返回 null', await shrinkImage({}, bigPng, readImageSize(bigPng), limits), null)
+}
+
 console.log('\n=== 7. 清理测试产生的文件 ===')
-const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json', 'data/soup']
+const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json', 'data/soup', 'data/tmp']
 for (const rel of leftovers) {
   const p = path.join(pluginDir, rel)
   if (!fs.existsSync(p)) { console.log(`  ${rel} 不存在（无需清理）`); continue }

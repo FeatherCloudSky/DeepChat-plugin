@@ -47,6 +47,8 @@
   "soupEnable": true,
   "soupExpireHours": 24,
   "soupMaxImages": 3,
+  "soupMaxImageSide": 10000,
+  "soupMaxImageMB": 20,
   "soupRefreshOnView": false,
   "soupAllowMember": true,
   "broadcastGroups": [],

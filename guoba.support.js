@@ -431,6 +431,22 @@ export function supportGuoba() {
           componentProps: { min: 0, max: 9 }
         },
         {
+          field: 'soupMaxImageSide',
+          label: '汤面图片单边像素上限',
+          bottomHelpMessage: '默认 10000，也就是 10000×10000。超过的图会自动缩小后再存 —— ' +
+            '缩放借宿主自带的渲染器（出帮助图那个）完成，插件本身不装任何东西',
+          component: 'InputNumber',
+          componentProps: { min: 100, max: 50000 }
+        },
+        {
+          field: 'soupMaxImageMB',
+          label: '汤面单张图片体积上限（MB）',
+          bottomHelpMessage: '默认 20。存之前按像素和体积两个上限检查，超了先自动缩小；' +
+            '实在缩不动才跳过，并在回复里说明原因',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 256 }
+        },
+        {
           field: 'soupRefreshOnView',
           label: '查看时重新计时',
           bottomHelpMessage: '关闭（默认）：从记录那一刻起算，满「保存时长」就过期。' +
