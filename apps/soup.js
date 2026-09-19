@@ -136,8 +136,10 @@ function isFetchableImageUrl(value) {
  * 云元数据那类地址挡掉。
  */
 async function segmentImage(segment) {
-  const fileField = String(segment?.file ?? '')
-  const urlField = String(segment?.url ?? '')
+  // 兼容两种段结构：Yunzai 的 { file, url } 与 OneBot v11 的 { data: { file, url } }
+  const data = segment?.data && typeof segment.data === 'object' ? segment.data : null
+  const fileField = String(segment?.file ?? data?.file ?? '')
+  const urlField = String(segment?.url ?? data?.url ?? '')
   const url = isHttpUrl(urlField) ? urlField : (isHttpUrl(fileField) ? fileField : '')
   const localRaw = fileField && !isHttpUrl(fileField) ? fileField : ''
 
@@ -210,11 +212,56 @@ async function sendImage(e, buffer, image) {
   return false
 }
 
+/**
+ * 有些适配器的聊天记录里，message 是一串 CQ 码而不是分段数组。
+ * 这种字符串直接当正文存下来，就会出现「明明是图片，却存成一段文字」。
+ */
+function parseCqString(raw) {
+  const unescape = (value) => String(value ?? '')
+    .replace(/&#91;/g, '[')
+    .replace(/&#93;/g, ']')
+    .replace(/&#44;/g, ',')
+    .replace(/&amp;/g, '&')
+
+  const segments = []
+  const pattern = /\[CQ:([a-zA-Z0-9_]+)((?:,[^\]]*)?)\]/g
+  let last = 0
+  let match
+
+  while ((match = pattern.exec(raw)) !== null) {
+    const plain = raw.slice(last, match.index)
+    if (plain) segments.push({ type: 'text', text: plain })
+    last = match.index + match[0].length
+
+    const type = match[1].toLowerCase()
+    const params = {}
+    for (const pair of match[2].split(',').filter(Boolean)) {
+      const at = pair.indexOf('=')
+      if (at > 0) params[pair.slice(0, at)] = unescape(pair.slice(at + 1))
+    }
+    segments.push({ type, ...params })
+  }
+
+  const tail = raw.slice(last)
+  if (tail) segments.push({ type: 'text', text: tail })
+  return segments
+}
+
+/** 按段类型取文字：兼容 Yunzai 的 { text } 与 OneBot v11 的 { data: { text } } */
+function textOfSegment(segment) {
+  if (typeof segment?.text === 'string') return segment.text
+  if (segment?.data && typeof segment.data === 'object' && typeof segment.data.text === 'string') {
+    return segment.data.text
+  }
+  return ''
+}
+
 /** 把一条消息的段拆成「文字 + 图片段」 */
 function splitSegments(quoted) {
   if (Array.isArray(quoted?.message)) return quoted.message
+  if (typeof quoted?.message === 'string' && quoted.message.trim()) return parseCqString(quoted.message)
   if (typeof quoted?.raw_message === 'string' && quoted.raw_message.trim()) {
-    return [{ type: 'text', text: quoted.raw_message }]
+    return parseCqString(quoted.raw_message)
   }
   return []
 }
@@ -229,10 +276,35 @@ export class soup extends plugin {
       // 这样 #汤面 不会被 chat.js 的兜底抢走。
       priority: -3500,
       rule: [
-        { reg: '^#汤面$', fnc: 'soup' },
-        { reg: '^#删除汤面$', fnc: 'remove' }
+        // 容忍全角 ＃ 和前后空格 —— 手机上打字很容易多一个空格，
+        // 而「发了没反应」十有八九就是这种看不见的差异
+        { reg: '^[#＃]\\s*汤面\\s*$', fnc: 'soup' },
+        { reg: '^[#＃]\\s*删除汤面\\s*$', fnc: 'remove' }
       ]
     })
+  }
+
+  /**
+   * 每条消息都先过这里。返回 false = 「我不认领这条消息」，消息继续往下走。
+   *
+   * 这里只做一件事：消息里提到「汤面」就把 e.msg 原样记进日志。
+   * 以后要是再出现「发了 #汤面 没反应」，看日志就能分清是
+   * 「消息根本没送到插件」（群设成了仅 @ 时响应）还是
+   * 「送到了，但内容跟预期不一样」。
+   */
+  async accept(e) {
+    try {
+      const msg = String(e?.msg ?? '')
+      if (msg.includes('汤面')) {
+        logger.info(
+          `[${pluginName}] 收到含「汤面」的消息：${JSON.stringify(msg)}` +
+          `（会话 ${e?.isGroup ? `群 ${e.group_id}` : `私聊 ${e?.user_id}`}）`
+        )
+      }
+    } catch (error) {
+      // 只是日志，绝不能因为它影响消息流转
+    }
+    return false
   }
 
   /** 记录 / 删除的资格：主人管理员恒可用，普通成员看开关（默认开） */
@@ -275,9 +347,16 @@ export class soup extends plugin {
     const segments = splitSegments(quoted)
     const text = segments
       .filter((seg) => seg?.type === 'text')
-      .map((seg) => seg.text ?? '')
+      .map(textOfSegment)
       .join('')
       .trim()
+
+    // 出问题时最想知道的就是「插件到底看到了什么」，直接写进日志
+    logger.info(
+      `[${pluginName}] 被引用的消息形态：message=` +
+      `${Array.isArray(quoted?.message) ? `数组(${quoted.message.length})` : typeof quoted?.message}、` +
+      `段类型=${segments.map((seg) => seg?.type || '?').join('/') || '无'}`
+    )
 
     const max = Cfg.getNumber('soupMaxImages', 3, 0, 9)
     const imageSegments = max > 0 ? segments.filter((seg) => seg?.type === 'image').slice(0, max) : []

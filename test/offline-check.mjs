@@ -1472,6 +1472,38 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
     checkTrue('Buffer 发图失败后退回 base64', String(raw[2] || '').startsWith('base64://'))
   }
 
+  // 适配器把聊天记录给成 CQ 码字符串时，也要能认出里面的图片
+  globalThis.fetch = async () => new Response(pngBytes, {
+    status: 200, headers: { 'content-type': 'image/png' }
+  })
+  const cqRecord = quote({
+    message_id: 'soup-cq',
+    message: '[CQ:image,file=abc.image,url=https://example.com/cq.jpg]'
+  })
+  await soupApp.soup(cqRecord)
+  check('CQ 码字符串里的图片也能存下', Soup.get(cqRecord)?.images?.length, 1)
+
+  // OneBot v11 的段结构：{ type: 'image', data: { url } }
+  const ob11Record = quote({
+    message_id: 'soup-ob11',
+    message: [{ type: 'image', data: { url: 'https://example.com/ob11.jpg' } }]
+  })
+  await soupApp.soup(ob11Record)
+  globalThis.fetch = originalFetch
+  check('OneBot 结构的图片也能存下', Soup.get(ob11Record)?.images?.length, 1)
+
+  // 命令容错：手机上多打一个空格、或者打了全角 ＃
+  {
+    const rules = (soupApp.rule || []).map((r) => r.reg)
+    const matches = (text) => rules.some((reg) => new RegExp(reg).test(text))
+    check('命令：普通写法', matches('#汤面'), true)
+    check('命令：尾部多余空格', matches('#汤面 '), true)
+    check('命令：全角 ＃', matches('＃汤面'), true)
+    check('命令：删除汤面', matches('#删除汤面'), true)
+    check('命令：不会误伤别的话', matches('#汤面好吃'), false)
+    check('accept 不认领消息（不影响别的插件）', await soupApp.accept(evt({ msg: '#汤面' })), false)
+  }
+
   // ---- 删除
   const del = evt()
   await soupApp.remove(del)
