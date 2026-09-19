@@ -67,9 +67,9 @@ export class help extends plugin {
     // 发图统一走 replyImage（消息段），裸 Buffer 在 OneBot 系适配器上会被丢掉。
     const image = await render('help/index', this.buildRenderData(content), { e, scale: 1.15 })
     if (image) {
-      const sent = typeof e?.reply === 'function' ? await replyImage(e, image) : false
-      if (sent) return true
-      logger.warn(`[${pluginName}] 帮助图发不出去，改发纯文本`)
+      const sent = typeof e?.reply === 'function' ? await replyImage(e, image) : { ok: false }
+      if (sent.ok) return true
+      logger.warn(`[${pluginName}] 帮助图发不出去（${sent.error || '未知原因'}），改发纯文本`)
     }
 
     const text = HelpContent.toPlainText(content)

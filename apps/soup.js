@@ -189,10 +189,16 @@ async function segmentImage(segment) {
   }
 }
 
-/** 发汤面图：走统一的图片段写法；实在发不出去就把原地址发出来 */
+/** 发汤面图：走统一的图片段写法；发不出去就说清楚，别静默 */
 async function sendImage(e, buffer, image) {
-  if (await replyImage(e, buffer)) return true
-  if (image?.url) await e.reply(`（这张图发不出来，原地址：${image.url}）`)
+  const sent = await replyImage(e, buffer)
+  if (sent.ok) return true
+  logger.warn(`[${pluginName}] 汤面图发送失败：${sent.error || '未知原因'}`)
+  await e.reply(
+    image?.url
+      ? `（这张图发不出去：${sent.error || '被协议端拒绝'}。原地址：${image.url}）`
+      : `（这张图发不出去：${sent.error || '被协议端拒绝'}。如果别的插件发图也失败，多半是账号被限制发图了）`
+  )
   return false
 }
 

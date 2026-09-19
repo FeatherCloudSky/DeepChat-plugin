@@ -32,17 +32,43 @@ export function imageCandidates(buffer) {
 }
 
 /**
- * 把一张图发出去。
- * @returns {Promise<boolean>} 是否发出去了（某种形态没抛错）
+ * 这次发送到底成没成。
+ *
+ * 关键：宿主**不抛异常**，而是把失败塞进返回值里 ——
+ *   TRSS 的 loader.reply() 里 try/catch 包着发送，出错时返回 { error: [...] }，
+ *   协议端（NapCat）失败时返回 { status: 'failed', retcode: 1200, ... }。
+ * 只判断「有没有抛错」会把失败当成功，然后静静地什么都不发。
+ */
+function isSendFailed(res) {
+  if (!res || typeof res !== 'object') return false
+  if (res.error) return true
+  if (res.status === 'failed') return true
+  if (typeof res.retcode === 'number' && res.retcode !== 0) return true
+  return false
+}
+
+/** 从返回值里抠一句能看的错误说明 */
+function describeFailure(res) {
+  const raw = res?.error || res
+  return String(raw?.message || raw?.wording || '').split('\n')[0].slice(0, 120) || '发送失败'
+}
+
+/**
+ * 把一张图发出去，一种写法失败了就换下一种。
+ * @returns {Promise<{ok: boolean, error?: string}>}
  */
 export async function replyImage(e, buffer) {
+  let lastError = ''
   for (const candidate of imageCandidates(buffer)) {
     try {
-      await e.reply(candidate)
-      return true
+      const res = await e.reply(candidate)
+      if (!isSendFailed(res)) return { ok: true }
+      lastError = describeFailure(res)
+      logger.warn(`[${pluginName}] 这种发图方式被拒绝（${lastError}），换下一种`)
     } catch (error) {
-      logger.warn(`[${pluginName}] 这种发图方式失败，换下一种：${error.message || error}`)
+      lastError = error?.message || String(error)
+      logger.warn(`[${pluginName}] 这种发图方式报错（${lastError}），换下一种`)
     }
   }
-  return false
+  return { ok: false, error: lastError }
 }

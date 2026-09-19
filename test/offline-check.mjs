@@ -1593,13 +1593,36 @@ console.log('\n=== 6.11 发图统一入口 ===')
 
   // replyImage：第一次成功就不再往下试
   const okEvent = { calls: 0, reply() { this.calls++; return Promise.resolve({}) } }
-  check('发图成功返回 true', await replyImage(okEvent, bytes), true)
+  check('发图成功返回 ok', (await replyImage(okEvent, bytes)).ok, true)
   check('成功时只发了一次', okEvent.calls, 1)
 
   // 全都抛错时返回 false，交给调用方兜底
   const failEvent = { calls: 0, reply() { this.calls++; return Promise.reject(new Error('不行')) } }
-  check('全都失败返回 false', await replyImage(failEvent, bytes), false)
+  const failRes = await replyImage(failEvent, bytes)
+  check('全都失败返回 ok=false', failRes.ok, false)
   check('失败时把候选写法都试了', failEvent.calls >= 2, true)
+
+  // 关键：宿主把失败塞在返回值里（不抛异常）也要认出来，
+  // 否则「没发出去」会被当成「发出去了」，然后静默什么都不发
+  const rejectedEvent = {
+    calls: 0,
+    reply() {
+      this.calls++
+      return Promise.resolve({
+        status: 'failed',
+        retcode: 1200,
+        error: { message: 'EventChecker Failed: sendMsg' }
+      })
+    }
+  }
+  const rejected = await replyImage(rejectedEvent, bytes)
+  check('返回值里带错误也算失败', rejected.ok, false)
+  check('失败原因被带出来', /EventChecker/.test(rejected.error || ''), true)
+  check('失败时把所有写法都试了', rejectedEvent.calls >= 2, true)
+
+  // 返回值是 { error: [...] } 也算失败（TRSS 的 loader 就是这么包的）
+  const errResEvent = { calls: 0, reply() { this.calls++; return Promise.resolve({ error: [new Error('发送消息错误')] }) } }
+  check('返回 error 数组也算失败', (await replyImage(errResEvent, bytes)).ok, false)
 }
 
 console.log('\n=== 7. 清理测试产生的文件 ===')
