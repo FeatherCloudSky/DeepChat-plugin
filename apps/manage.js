@@ -15,11 +15,17 @@ import { findQuotedMessage, isFetchableUrl } from '../model/utils.js'
 const TEXT_FILE_RE = /\.(txt|md|markdown|json|ya?ml|csv|log|ini|conf)$/i
 const TEXT_FILE_MAX = 1024 * 1024
 
-/** 从文件段里读出文本：本机临时文件优先，其次下载地址 */
-async function readTextSegment(segment) {
+/** 从文件段里读出文本：本机临时文件优先，其次下载地址，再不行问问适配器 */
+async function readTextSegment(e, segment) {
   const data = segment?.data && typeof segment.data === 'object' ? segment.data : segment
   const fileField = String(data?.file ?? '')
   const urlField = String(data?.url ?? '')
+  const idField = String(data?.file_id ?? data?.id ?? '')
+
+  logger.info(
+    `[${pluginName}] 人设文件段：字段=${Object.keys(data || {}).join(',') || '(空)'}` +
+    `${idField ? `，file_id=${idField}` : ''}`
+  )
 
   const candidates = []
   if (fileField && !/^https?:\/\//i.test(fileField)) {
@@ -36,12 +42,39 @@ async function readTextSegment(segment) {
     }
   }
 
-  const url = /^https?:\/\//i.test(urlField) ? urlField : (/^https?:\/\//i.test(fileField) ? fileField : '')
-  if (!url || !isFetchableUrl(url)) return ''
+  let url = /^https?:\/\//i.test(urlField) ? urlField : (/^https?:\/\//i.test(fileField) ? fileField : '')
+
+  // 有些适配器（尤其群文件）不直接给地址，只给一个 file_id，得再问一次
+  if (!url && idField) {
+    const target = e?.isGroup ? e?.group : e?.friend
+    for (const name of ['getFileUrl', 'getFileURL', 'getFile']) {
+      if (typeof target?.[name] !== 'function') continue
+      try {
+        const got = await target[name](idField)
+        const value = typeof got === 'string' ? got : String(got?.url ?? '')
+        if (/^https?:\/\//i.test(value)) {
+          url = value
+          logger.info(`[${pluginName}] 通过 ${name}() 拿到了人设文件的下载地址`)
+          break
+        }
+      } catch (error) {
+        logger.warn(`[${pluginName}] ${name}() 取人设文件地址失败：${error.message || error}`)
+      }
+    }
+  }
+
+  if (!url || !isFetchableUrl(url)) {
+    logger.warn(`[${pluginName}] 人设文件段里没有可用的下载地址（字段：${Object.keys(data || {}).join(',') || '空'}）`)
+    return ''
+  }
 
   try {
     const result = await getBuffer(url, 15000, TEXT_FILE_MAX)
-    if (!result.ok || !result.buffer?.length) return ''
+    if (!result.ok || !result.buffer?.length) {
+      logger.warn(`[${pluginName}] 下载人设文件失败：HTTP ${result.status ?? '?'}`)
+      return ''
+    }
+    logger.mark(`[${pluginName}] 已从文件读入人设：${(result.buffer.length / 1024).toFixed(1)}KB`)
     return result.buffer.toString('utf8')
   } catch (error) {
     logger.warn(`[${pluginName}] 下载人设文件失败：${error.message || error}`)
@@ -55,7 +88,7 @@ async function readTextSegment(segment) {
  *   2. 否则取消息里的文字
  * @returns {Promise<{text: string, from: string}>}
  */
-async function quotedContent(quoted) {
+async function quotedContent(e, quoted) {
   if (!quoted) return { text: '', from: '' }
 
   const segments = Array.isArray(quoted.message) ? quoted.message : null
@@ -68,8 +101,14 @@ async function quotedContent(quoted) {
   })
 
   if (fileSegment) {
-    const text = (await readTextSegment(fileSegment)).replace(/^\uFEFF/, '').trim()
+    const text = (await readTextSegment(e, fileSegment)).replace(/^\uFEFF/, '').trim()
     if (text) return { text, from: '被引用的文本文件' }
+    // 有文件却读不到，绝不能退回「把消息里那几个字当人设」—— 那是静默存错东西
+    return {
+      text: '',
+      from: '',
+      error: '引用的消息里确实带了文本文件，但读不到内容（适配器没给下载地址，或者文件太大）'
+    }
   }
 
   return { text: segmentsToText(segments).trim(), from: '消息文字' }
@@ -153,7 +192,7 @@ export class manage extends plugin {
     if (arg === '0' || arg === '默认' || arg === '默认人设') {
       ChatState.clearPromptChoice(e)
       const { from } = Prompt.activePrompt(e)
-      return e.reply(`已把${this.sessionName(e)}的人设切回面板默认（来自${from}）。`)
+      return e.reply(`已把${this.sessionName(e)}的人设交回面板安排，当前生效的来自${from}。`)
     }
 
     const preset = Prompt.findPreset(arg)
@@ -185,7 +224,8 @@ export class manage extends plugin {
     let source = '命令后面的文字'
     if (!content) {
       const quoted = await findQuotedMessage(e)
-      const picked = await quotedContent(quoted)
+      const picked = await quotedContent(e, quoted)
+      if (picked.error) return e.reply(`${picked.error}。\n可以把内容直接贴在命令后面，或者检查一下适配器能不能取到文件地址。`)
       content = picked.text
       source = picked.from || source
     }

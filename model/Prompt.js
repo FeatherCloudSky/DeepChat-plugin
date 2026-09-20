@@ -25,6 +25,7 @@ import path from 'node:path'
 import Cfg from './Cfg.js'
 import ChatState from './ChatState.js'
 import { pluginData, pluginName } from '../config/constant.js'
+import { parseIdList, idIn } from './utils.js'
 
 const DEFAULT_DIR = path.join(pluginData, 'prompts')
 
@@ -46,6 +47,7 @@ function safeKey(title, fallback) {
 
 function readPreset(file) {
   const full = path.join(promptDir(), file)
+  if (!fs.existsSync(full)) return null
   const key = file.replace(/\.json$/i, '')
   try {
     const parsed = JSON.parse(fs.readFileSync(full, 'utf8'))
@@ -55,6 +57,8 @@ function readPreset(file) {
       key,
       title,
       content: String(parsed?.content ?? ''),
+      groups: parseIdList(parsed?.groups),
+      users: parseIdList(parsed?.users),
       file: full,
       updatedAt: Number(parsed?.updatedAt) || 0
     }
@@ -83,22 +87,31 @@ function listFiles() {
  * 目录**还不存在**时把它们搬成文件，之后面板那份就不用了。
  * 目录已经存在（哪怕是空的）就不再搬 —— 免得你删光文件后又被自动塞回来。
  */
+let migrating = false
+
 function migrateFromConfig() {
+  // 防重入：下面的 savePreset 会读写同一个目录，别再绕回来
+  if (migrating) return 0
   const rows = Cfg.get('promptList', [])
   if (!Array.isArray(rows) || rows.length === 0) return 0
   if (fs.existsSync(promptDir())) return 0
 
-  let saved = 0
-  for (const row of rows) {
-    const title = String(row?.title ?? '').trim()
-    const content = String(row?.content ?? '').trim()
-    if (!title && !content) continue
-    if (savePreset(title || `人设${saved + 1}`, content)) saved++
+  migrating = true
+  try {
+    let saved = 0
+    for (const row of rows) {
+      const title = String(row?.title ?? '').trim()
+      const content = String(row?.content ?? '').trim()
+      if (!title && !content) continue
+      if (savePreset(title || `人设${saved + 1}`, content)) saved++
+    }
+    if (saved > 0) {
+      logger.mark(`[${pluginName}] 已把面板里的 ${saved} 套人设搬到 ${promptDir()}，之后以文件为准`)
+    }
+    return saved
+  } finally {
+    migrating = false
   }
-  if (saved > 0) {
-    logger.mark(`[${pluginName}] 已把面板里的 ${saved} 套人设搬到 ${promptDir()}，之后以文件为准`)
-  }
-  return saved
 }
 
 /** 当前有哪些人设；序号就是这里面的顺序 */
@@ -126,20 +139,29 @@ export function findPreset(key) {
     null
 }
 
-/** 写一套人设（同名覆盖）；返回保存结果 */
-export function savePreset(title, content) {
+/**
+ * 写一套人设（同名覆盖）。
+ * @param {string} title 显示名
+ * @param {string} content 人设内容
+ * @param {{groups?: any, users?: any}} [extra] 适用群 / 适用私聊；不传就保留文件里原有的
+ */
+export function savePreset(title, content, extra = {}) {
   const name = String(title ?? '').trim()
   if (!name) return null
 
   const dir = promptDir()
   const key = safeKey(name, Date.now())
   const file = path.join(dir, `${key}.json`)
+  // 直接读同名文件，别走 presetList —— 那会触发自动搬迁，搬的时候又调回这里
+  const existing = readPreset(`${key}.json`)
 
   try {
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(file, JSON.stringify({
       title: name,
       content: String(content ?? ''),
+      groups: extra.groups !== undefined ? parseIdList(extra.groups) : parseIdList(existing?.groups),
+      users: extra.users !== undefined ? parseIdList(extra.users) : parseIdList(existing?.users),
       updatedAt: Date.now()
     }, null, 2), 'utf8')
   } catch (error) {
@@ -164,25 +186,51 @@ export function removePreset(key) {
 }
 
 /**
- * 当前会话真正生效的人设。
+ * 当前会话真正生效的人设。优先级从高到低：
+ *   1. 本会话手动切过（#切换提示词）—— 最优先，这是当场下的命令
+ *   2. 面板为这个群 / 这个私聊安排的人设
+ *   3. 面板里指定的「默认人设文件」
+ *   4. 面板里的默认人设文本（prompt）
+ *
  * @returns {{index: number, key: string, title: string, content: string, from: string}}
  */
 export function activePrompt(e) {
+  const list = presetList()
+  const isGroup = Boolean(e?.isGroup)
+  const sessionId = String((isGroup ? e?.group_id : e?.user_id) ?? '')
+
+  // 1. 本会话手动切过
   const choice = ChatState.getPromptChoice(e)
   if (choice) {
-    const list = presetList()
     const hit = list.find((preset) => preset.key === choice) ||
       list.find((preset) => preset.title === choice) ||
       (/^\d+$/.test(choice) ? list.find((preset) => preset.index === Number(choice)) : null)
-    if (hit) return { ...hit, from: '本会话设置' }
+    if (hit) return { ...hit, from: '本会话手动切换' }
   }
 
+  // 2. 面板按群 / 按私聊安排的人设
+  //    群只认「适用群」，私聊只认「适用私聊」—— 不然群号碰巧等于某个 QQ 号就会串味
+  if (sessionId) {
+    const assigned = list.find((preset) => isGroup
+      ? idIn(preset.groups, sessionId)
+      : idIn(preset.users, sessionId))
+    if (assigned) return { ...assigned, from: '面板安排' }
+  }
+
+  // 3. 面板指定的默认人设文件
+  const fallbackKey = String(Cfg.get('promptDefault', '') || '').trim()
+  if (fallbackKey) {
+    const preset = findPreset(fallbackKey)
+    if (preset) return { ...preset, from: '面板默认人设文件' }
+  }
+
+  // 4. 面板里的默认人设文本
   return {
     index: 0,
     key: '',
     title: '',
     content: String(Cfg.get('prompt', '') || '').trim(),
-    from: '面板默认'
+    from: '面板默认文本'
   }
 }
 
@@ -197,7 +245,9 @@ export function panelRows() {
   return presetList().map((preset) => ({
     key: preset.key,
     title: preset.title,
-    content: ''
+    content: '',
+    groups: preset.groups.join(','),
+    users: preset.users.join(',')
   }))
 }
 
@@ -226,13 +276,18 @@ export function applyPanelRows(rows) {
     const finalContent = content.trim() ? content : (existing?.content ?? '')
     if (!finalContent.trim() && !existing) continue
 
-    const result = savePreset(finalTitle, finalContent)
+    // 适用群 / 适用私聊：面板给了就按面板的来（清空即取消分配）
+    const result = savePreset(finalTitle, finalContent, {
+      groups: row?.groups ?? existing?.groups ?? [],
+      users: row?.users ?? existing?.users ?? []
+    })
     if (!result) continue
     keep.add(result.key)
     saved++
 
     // 改名导致文件名变了：把旧文件删掉，别留下重复的人设
     if (existing && result.key !== existing.key) {
+      keep.add(existing.key)        // 旧名字不再参与后面那轮删除，免得又去删一次
       try {
         fs.unlinkSync(existing.file)
       } catch (error) {
@@ -266,13 +321,18 @@ export function describeList(e) {
   } else {
     for (const preset of list) {
       const mark = active.key && active.key === preset.key ? ' ←当前' : ''
-      const size = preset.content.length > 0 ? `（${preset.content.length} 字）` : '（空）'
-      lines.push(`${preset.index}. ${preset.title}${size}${mark}`)
+      const size = preset.content.length > 0
+        ? `（${preset.content.length} 字 / ${(Buffer.byteLength(preset.content, 'utf8') / 1024).toFixed(1)}KB）`
+        : '（空）'
+      const where = []
+      if (preset.groups.length > 0) where.push(`群 ${preset.groups.join('、')}`)
+      if (preset.users.length > 0) where.push(`私聊 ${preset.users.join('、')}`)
+      lines.push(`${preset.index}. ${preset.title}${size}${where.length > 0 ? `　→ ${where.join('，')}` : ''}${mark}`)
     }
-    lines.push('', `当前生效：${active.key ? `${active.title}（来自${active.from}）` : `面板默认人设（来自${active.from}）`}`)
+    lines.push('', `当前生效：${active.key ? active.title : '面板里的默认人设'}（来自${active.from}）`)
   }
 
-  lines.push('切换： #切换提示词1　/　#切换提示词 名字　/　#切换提示词0（回默认）')
+  lines.push('切换： #切换提示词1　/　#切换提示词 名字　/　#切换提示词0（回到面板安排）')
   lines.push('新增 / 覆盖： #设置人设 名字 内容（也可引用一条消息）')
   lines.push('删除： #删除人设 名字')
   return lines.join('\n')

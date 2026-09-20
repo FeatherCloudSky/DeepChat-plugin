@@ -1805,7 +1805,7 @@ console.log('\n=== 6.13 人设预设与切换 ===')
   check('被拒之后确实没写文件', fs.existsSync(path.join(promptsDir, '坏人.json')), false)
 
   const plain = evt()
-  check('没切过时用面板默认', Prompt.activePrompt(plain).from, '面板默认')
+  check('没切过时用面板默认文本', Prompt.activePrompt(plain).from, '面板默认文本')
   check('默认人设内容正确', Prompt.activePrompt(plain).content, '默认人设：普通猫娘')
 
   const notMaster = evt({ user_id: 20002 })
@@ -1892,23 +1892,61 @@ console.log('\n=== 6.13 人设预设与切换 ===')
   checkTrue('删除人设', /已删除人设/.test(del.__replied[0] || ''))
   check('人设文件也删了', fs.existsSync(path.join(promptsDir, '文件人设.json')), false)
 
+  // 面板按群 / 按私聊分配人设（没配的走默认）—— 用一个干净的状态测
+  fs.rmSync(promptsDir, { recursive: true, force: true })
+  Prompt.savePreset('群用人设', '群用的内容')
+  Prompt.savePreset('私聊用人设', '私聊用的内容')
+  ChatState.clearAll()
+  Cfg.set('promptDefault', '')
+
+  Prompt.applyPanelRows(Prompt.panelRows().map((row) => (
+    row.key === '群用人设' ? { ...row, groups: '660011, 660012' } : row
+  )))
+  check('面板给群分配后，这个群自动用它', Prompt.activePrompt(evt({ group_id: 660011 })).title, '群用人设')
+  check('来源标注是面板安排', Prompt.activePrompt(evt({ group_id: 660011 })).from, '面板安排')
+  check('没点名的群还是默认', Prompt.activePrompt(evt({ group_id: 660099 })).from, '面板默认文本')
+
+  Prompt.applyPanelRows(Prompt.panelRows().map((row) => (
+    row.key === '私聊用人设' ? { ...row, users: '10001' } : row
+  )))
+  check('私聊按 QQ 分配', Prompt.activePrompt(evt({ isGroup: false, user_id: 10001 })).title, '私聊用人设')
+  check('群号不会串到私聊上（哪怕数字一样）',
+    Prompt.activePrompt(evt({ isGroup: false, user_id: 660011 })).from, '面板默认文本')
+  check('私聊号也不会串到群里',
+    Prompt.activePrompt(evt({ isGroup: true, group_id: 10001 })).from, '面板默认文本')
+
+  const manual = evt({ group_id: 660011 })
+  ChatState.setPromptChoice(manual, '私聊用人设')
+  check('手动切换优先于面板安排', Prompt.activePrompt(manual).title, '私聊用人设')
+  check('来源标注是手动切换', Prompt.activePrompt(manual).from, '本会话手动切换')
+  ChatState.clearPromptChoice(manual)
+  check('手动那套清掉后，又按面板安排', Prompt.activePrompt(manual).title, '群用人设')
+
+  Prompt.savePreset('群用人设', '换了内容但没提分配')
+  check('只改内容不会抹掉分配', Prompt.findPreset('群用人设')?.groups, ['660011', '660012'])
+
+  Cfg.set('promptDefault', '私聊用人设')
+  check('能指定默认人设文件', Prompt.activePrompt(evt({ group_id: 660099 })).title, '私聊用人设')
+  check('来源标注是默认人设文件', Prompt.activePrompt(evt({ group_id: 660099 })).from, '面板默认人设文件')
+  Cfg.set('promptDefault', '')
+
   // 面板那一栏：只回名字、不回内容（内容进了请求体就会撞 100KB 的 413）
   const rows = Prompt.panelRows()
   checkTrue('面板行不带内容', rows.every((row) => row.content === ''), true)
   checkTrue('面板行带文件名和显示名', rows.every((row) => row.key && row.title))
 
-  Prompt.applyPanelRows(rows.map((row) => (row.key === '严肃助手' ? { ...row, title: '严肃助手改' } : row)))
-  check('面板改显示名 → 文件跟着改名', fs.existsSync(path.join(promptsDir, '严肃助手改.json')), true)
-  check('改名后旧文件不再留着', fs.existsSync(path.join(promptsDir, '严肃助手.json')), false)
+  Prompt.applyPanelRows(rows.map((row) => (row.key === '群用人设' ? { ...row, title: '群用人设改' } : row)))
+  check('面板改显示名 → 文件跟着改名', fs.existsSync(path.join(promptsDir, '群用人设改.json')), true)
+  check('改名后旧文件不再留着', fs.existsSync(path.join(promptsDir, '群用人设.json')), false)
 
   Prompt.applyPanelRows(Prompt.panelRows().map((row) => (
-    row.key === '严肃助手改' ? { ...row, content: '面板填的新内容' } : row
+    row.key === '群用人设改' ? { ...row, content: '面板填的新内容' } : row
   )))
-  check('面板填了内容就覆盖文件', Prompt.findPreset('严肃助手改')?.content, '面板填的新内容')
+  check('面板填了内容就覆盖文件', Prompt.findPreset('群用人设改')?.content, '面板填的新内容')
 
-  const kept = Prompt.findPreset('严肃助手改')?.content
+  const kept = Prompt.findPreset('群用人设改')?.content
   Prompt.applyPanelRows(Prompt.panelRows())
-  check('内容留空则保持文件里原有的', Prompt.findPreset('严肃助手改')?.content, kept)
+  check('内容留空则保持文件里原有的', Prompt.findPreset('群用人设改')?.content, kept)
 
   const allRows = Prompt.panelRows()
   const removed = Prompt.applyPanelRows(allRows.slice(0, allRows.length - 1))

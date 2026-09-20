@@ -16,6 +16,7 @@
   "promptList": [],
   "promptIndex": [],
   "promptDir": "",
+  "promptDefault": "",
   "aiName": "猫娘",
   "enableName": true,
   "aiNameRegex": false,

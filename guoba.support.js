@@ -189,9 +189,31 @@ export function supportGuoba() {
                 component: 'InputTextArea',
                 bottomHelpMessage: '只有想替换这个人设的内容时才填；留空表示保持文件里原有的不变',
                 componentProps: { rows: 4, placeholder: '留空即可；要改长文请用 #设置人设 名字 + 引用' }
+              },
+              {
+                field: 'groups',
+                label: '适用群',
+                component: 'Input',
+                bottomHelpMessage: '填群号，多个用逗号隔开，这些群会自动用这套人设。留空 = 不指定',
+                componentProps: { placeholder: '123456, 234567' }
+              },
+              {
+                field: 'users',
+                label: '适用私聊',
+                component: 'Input',
+                bottomHelpMessage: '填 QQ 号，多个用逗号隔开，和这些人私聊时用这套人设。留空 = 不指定',
+                componentProps: { placeholder: '10001, 10002' }
               }
             ]
           }
+        },
+        {
+          field: 'promptDefault',
+          label: '默认用哪套人设',
+          bottomHelpMessage: '没被「适用群 / 适用私聊」点名、也没在会话里手动切过的会话，都用这套。' +
+            '填人设名字（留空则用上面那份「Prompt 人设」文本）',
+          component: 'Input',
+          componentProps: { placeholder: '猫娘' }
         },
         {
           field: 'aiName',
