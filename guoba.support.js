@@ -5,6 +5,7 @@
  * 其余字段按顺序渲染到该标签页里。
  */
 import Cfg from './model/Cfg.js'
+import Prompt from './model/Prompt.js'
 import path from 'node:path'
 import { pluginResources } from './config/constant.js'
 
@@ -157,27 +158,37 @@ export function supportGuoba() {
           componentProps: { rows: 6, placeholder: '你是一只可爱的猫娘……' }
         },
         {
-          field: 'promptList',
-          label: '人设预设（可多套）',
-          bottomHelpMessage: '一次配好几套人设，主人用「#切换提示词1」这类命令给**当前会话**切换；' +
-            '不同群可以同时用不同人设。没切换过的会话用上面那份默认人设。' +
-            '「#切换提示词0」回到默认，「#提示词列表」看有哪些',
+          field: 'promptIndex',
+          label: '人设（一套一个文件）',
+          bottomHelpMessage: '每个条目对应 data/prompts/ 里的一个人设文件：改「显示名」即改名，' +
+            '填「内容」即覆盖文件内容，删掉整行即删掉这个人设。' +
+            '**内容留空 = 保留文件里原有的**（长人设就别往这里贴了，面板保存的请求体上限只有 100KB，' +
+            '超了会被服务器 413 拒掉）—— 长文用「#设置人设 名字」+ 引用一条消息来存。' +
+            '切换命令：#切换提示词1 / #切换提示词 名字 / #切换提示词0（回默认人设）',
           component: 'GSubForm',
           componentProps: {
             multiple: true,
             schemas: [
               {
+                field: 'key',
+                label: '文件名',
+                component: 'Input',
+                bottomHelpMessage: '人设文件名（不含 .json），插件自动填，一般不用动',
+                componentProps: { placeholder: '猫娘' }
+              },
+              {
                 field: 'title',
-                label: '名称',
+                label: '显示名',
                 component: 'Input',
                 required: true,
                 componentProps: { placeholder: '猫娘 / 严肃助手 / 猫粮推销员……' }
               },
               {
                 field: 'content',
-                label: '人设内容',
+                label: '内容（留空=不改）',
                 component: 'InputTextArea',
-                componentProps: { rows: 4, placeholder: '你是一只……' }
+                bottomHelpMessage: '只有想替换这个人设的内容时才填；留空表示保持文件里原有的不变',
+                componentProps: { rows: 4, placeholder: '留空即可；要改长文请用 #设置人设 名字 + 引用' }
               }
             ]
           }
@@ -652,11 +663,18 @@ export function supportGuoba() {
       ],
 
       getConfigData() {
-        return Cfg.getAll()
+        // promptIndex 是「人设文件」的映射，不是普通配置项：
+        // 每次现从文件里算，而且**只回名字、不回内容** —— 内容进了请求体就会撞 100KB
+        return { ...Cfg.getAll(), promptIndex: Prompt.panelRows() }
       },
 
       setConfigData(data, { Result }) {
-        Cfg.setMany(data)
+        if (Array.isArray(data?.promptIndex)) {
+          Prompt.applyPanelRows(data.promptIndex)
+        }
+        const plain = { ...data }
+        delete plain.promptIndex        // 这栏只往文件里写，不进配置
+        Cfg.setMany(plain)
         return Result.ok({}, '保存成功')
       }
     }

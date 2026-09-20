@@ -1,10 +1,79 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import ChatState from '../model/ChatState.js'
 import Policy from '../model/Policy.js'
 import Provider from '../model/Provider.js'
 import Permission from '../model/Permission.js'
 import Prompt from '../model/Prompt.js'
+import { segmentsToText } from '../model/Recorder.js'
+import { getBuffer } from '../model/http.js'
 import Cfg from '../model/Cfg.js'
 import { pluginName } from '../config/constant.js'
+import { findQuotedMessage, isFetchableUrl } from '../model/utils.js'
+
+/** 当文本读的文件后缀，以及单个人设文件的体积上限 */
+const TEXT_FILE_RE = /\.(txt|md|markdown|json|ya?ml|csv|log|ini|conf)$/i
+const TEXT_FILE_MAX = 1024 * 1024
+
+/** 从文件段里读出文本：本机临时文件优先，其次下载地址 */
+async function readTextSegment(segment) {
+  const data = segment?.data && typeof segment.data === 'object' ? segment.data : segment
+  const fileField = String(data?.file ?? '')
+  const urlField = String(data?.url ?? '')
+
+  const candidates = []
+  if (fileField && !/^https?:\/\//i.test(fileField)) {
+    candidates.push(fileField, path.resolve(process.cwd(), fileField), path.resolve(process.cwd(), 'data', fileField))
+  }
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue
+      const stat = fs.statSync(candidate)
+      if (!stat.isFile() || stat.size === 0 || stat.size > TEXT_FILE_MAX) continue
+      return fs.readFileSync(candidate, 'utf8')
+    } catch (error) {
+      // 换下一个候选路径继续试
+    }
+  }
+
+  const url = /^https?:\/\//i.test(urlField) ? urlField : (/^https?:\/\//i.test(fileField) ? fileField : '')
+  if (!url || !isFetchableUrl(url)) return ''
+
+  try {
+    const result = await getBuffer(url, 15000, TEXT_FILE_MAX)
+    if (!result.ok || !result.buffer?.length) return ''
+    return result.buffer.toString('utf8')
+  } catch (error) {
+    logger.warn(`[${pluginName}] 下载人设文件失败：${error.message || error}`)
+    return ''
+  }
+}
+
+/**
+ * 被引用那条消息里的内容。两种来源：
+ *   1. 消息里带了 txt 之类的文本文件 → 读文件内容（长人设推荐这条路，怎么写都不嫌长）
+ *   2. 否则取消息里的文字
+ * @returns {Promise<{text: string, from: string}>}
+ */
+async function quotedContent(quoted) {
+  if (!quoted) return { text: '', from: '' }
+
+  const segments = Array.isArray(quoted.message) ? quoted.message : null
+  if (!segments) return { text: String(quoted.raw_message || '').trim(), from: '消息文字' }
+
+  const fileSegment = segments.find((segment) => {
+    if (segment?.type !== 'file') return false
+    const data = segment?.data && typeof segment.data === 'object' ? segment.data : segment
+    return TEXT_FILE_RE.test(String(data?.name || data?.file || ''))
+  })
+
+  if (fileSegment) {
+    const text = (await readTextSegment(fileSegment)).replace(/^\uFEFF/, '').trim()
+    if (text) return { text, from: '被引用的文本文件' }
+  }
+
+  return { text: segmentsToText(segments).trim(), from: '消息文字' }
+}
 
 export class manage extends plugin {
   constructor() {
@@ -22,7 +91,9 @@ export class manage extends plugin {
         { reg: '^#chat全开$', fnc: 'resetAll' },
         // 人设切换：只有主人能动（见 switchPrompt 里的判定）
         { reg: '^[#＃]\\s*切换提示词\\s*\\S*\\s*$', fnc: 'switchPrompt' },
-        { reg: '^[#＃]\\s*提示词列表$', fnc: 'promptList' }
+        { reg: '^[#＃]\\s*提示词列表$', fnc: 'promptList' },
+        { reg: '^[#＃]\\s*设置人设\\s*\\S+', fnc: 'savePrompt' },
+        { reg: '^[#＃]\\s*删除人设\\s*\\S+', fnc: 'removePrompt' }
       ]
     })
   }
@@ -80,7 +151,7 @@ export class manage extends plugin {
     if (!arg) return e.reply(Prompt.describeList(e))
 
     if (arg === '0' || arg === '默认' || arg === '默认人设') {
-      ChatState.clearPromptIndex(e)
+      ChatState.clearPromptChoice(e)
       const { from } = Prompt.activePrompt(e)
       return e.reply(`已把${this.sessionName(e)}的人设切回面板默认（来自${from}）。`)
     }
@@ -88,11 +159,63 @@ export class manage extends plugin {
     const preset = Prompt.findPreset(arg)
     if (!preset) return e.reply(`没找到人设「${arg}」。\n\n${Prompt.describeList(e)}`)
 
-    ChatState.setPromptIndex(e, preset.index)
+    ChatState.setPromptChoice(e, preset.key)
     return e.reply(
       `已把${this.sessionName(e)}切换到人设 ${preset.index}. ${preset.title}。\n` +
       '这个会话之后的回复都用这套人设；发 #切换提示词0 可以回到面板默认。'
     )
+  }
+
+  /**
+   * 新增 / 覆盖一套人设。两种写法：
+   *   #设置人设 达达利亚 你是一只猫娘……
+   *   #设置人设 达达利亚   ← 加上「引用一条消息」，内容取被引用那条
+   * 第二种是给角色卡那种长文本准备的：直接贴容易发不全，引用最省事。
+   */
+  async savePrompt(e) {
+    if (!Permission.isMaster(e)) return e.reply('只有主人才能设置人设。')
+
+    const arg = String(e.msg || '').replace(/^[#＃]\s*设置人设\s*/, '').trim()
+    if (!arg) return e.reply('用法：#设置人设 名字 内容，或者引用一条消息再发 #设置人设 名字。')
+
+    const gap = arg.search(/\s/)
+    const title = (gap === -1 ? arg : arg.slice(0, gap)).trim()
+    let content = gap === -1 ? '' : arg.slice(gap).trim()
+
+    let source = '命令后面的文字'
+    if (!content) {
+      const quoted = await findQuotedMessage(e)
+      const picked = await quotedContent(quoted)
+      content = picked.text
+      source = picked.from || source
+    }
+
+    if (!content) {
+      return e.reply(
+        `没拿到「${title}」的内容。两种写法：\n` +
+        `1. #设置人设 ${title} 你的内容是……\n` +
+        `2. 引用一条写着人设的消息（或者带 txt 文档的消息），发 #设置人设 ${title}`
+      )
+    }
+
+    const saved = Prompt.savePreset(title, content)
+    if (!saved) return e.reply(`保存「${title}」失败，检查一下人设目录的写权限。`)
+
+    return e.reply(
+      `已保存人设「${saved.title}」（${content.length} 字，来自${source}）。\n` +
+      `切换到它：#切换提示词 ${saved.title}\n` +
+      `文件：${saved.file}`
+    )
+  }
+
+  async removePrompt(e) {
+    if (!Permission.isMaster(e)) return e.reply('只有主人才能删除人设。')
+
+    const name = String(e.msg || '').replace(/^[#＃]\s*删除人设\s*/, '').trim()
+    const removed = Prompt.removePreset(name)
+    if (!removed) return e.reply(`没找到人设「${name}」。\n\n${Prompt.describeList(e)}`)
+
+    return e.reply(`已删除人设「${removed.title}」，对应的人设文件也删掉了。`)
   }
 
   async promptList(e) {

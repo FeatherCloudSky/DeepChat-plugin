@@ -97,20 +97,24 @@ const ChatState = {
     saveNow()
   },
 
-  /** 本会话选中的第几套人设；没设过返回 null */
-  getPromptIndex(e) {
-    const index = Number(promptBucket(e)[sessionKey(e)])
-    return Number.isInteger(index) && index > 0 ? index : null
+  /**
+   * 本会话选中的是哪套人设（存的是文件名/名字，不是序号 ——
+   * 序号会随着文件增减而变，存序号会让你选了的人设悄悄跑掉）。
+   * 没设过返回 null。
+   */
+  getPromptChoice(e) {
+    const value = promptBucket(e)[sessionKey(e)]
+    return value === undefined || value === null || value === '' ? null : String(value)
   },
 
-  setPromptIndex(e, index) {
-    promptBucket(e)[sessionKey(e)] = Number(index)
+  setPromptChoice(e, choice) {
+    promptBucket(e)[sessionKey(e)] = String(choice)
     saveNow()
-    return Number(index)
+    return String(choice)
   },
 
   /** 清除本会话的人设选择，回到面板默认 */
-  clearPromptIndex(e) {
+  clearPromptChoice(e) {
     delete promptBucket(e)[sessionKey(e)]
     saveNow()
   },

@@ -19,7 +19,7 @@ import { getBuffer } from '../model/http.js'
 import { replyImage } from '../model/message.js'
 import { readImageSize, isOverLimit, shrinkImage } from '../model/image.js'
 import { pluginName } from '../config/constant.js'
-import { findQuotedMessage } from '../model/utils.js'
+import { findQuotedMessage, isFetchableUrl } from '../model/utils.js'
 
 /**
  * 源图硬上限：超过这个数就不拉了，免得内存被顶爆。
@@ -92,43 +92,6 @@ function readLocalImage(raw) {
   return null
 }
 
-/** 这些地址不给拉：云厂商的元数据服务，SSRF 最经典的目标 */
-const BLOCKED_IMAGE_HOSTS = new Set([
-  '100.100.100.200',            // 阿里云元数据
-  '169.254.169.254',            // AWS / GCP / Azure 元数据
-  'metadata.google.internal',
-  'metadata.tencentyun.com'
-])
-
-/**
- * 汤面图必须真拉下来（要放 24 小时，只存 URL 撑不到），所以这里比
- * 「给模型看的图」宽一档：**允许 127.0.0.1 和内网地址**。
- *
- * 原因：不少适配器（OneBot 系的 NapCat、Lagrange 等）是拿本机的一个 HTTP
- * 端口供图的，地址就是 http://127.0.0.1:xxxx/xxx.jpg。按「只收公网」的规矩
- * 会把这整类图挡掉，表现就是「图片汤面存不下来」。
- *
- * 仍然挡：非 http(s) 协议、链路本地 / 组播地址、以及上面那几个元数据地址。
- */
-function isFetchableImageUrl(value) {
-  let url
-  try {
-    url = new URL(String(value ?? ''))
-  } catch (error) {
-    return false
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
-
-  const host = url.hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
-  if (!host) return false
-  if (BLOCKED_IMAGE_HOSTS.has(host)) return false
-  if (/^169\.254\./.test(host)) return false        // IPv4 链路本地
-  if (/^fe80:/i.test(host)) return false            // IPv6 链路本地
-  if (/^ff/i.test(host)) return false               // 组播
-  if (/^(0|22[4-9]|23\d|24\d|25[0-5])\./.test(host)) return false
-  return true
-}
-
 /**
  * 把被引用消息里的一个图片段变成字节。
  *
@@ -137,7 +100,7 @@ function isFetchableImageUrl(value) {
  *   2. 只有 http(s) 地址 —— 服务端去拉。
  *
  * 第 2 条是服务端发起的请求，地址来自群消息，所以要过一遍
- * isFetchableImageUrl：本机 / 内网放行（适配器常这么供图），
+ * isFetchableUrl：本机 / 内网放行（适配器常这么供图），
  * 云元数据那类地址挡掉。
  */
 async function segmentImage(segment) {
@@ -168,7 +131,7 @@ async function segmentImage(segment) {
     return { ok: false, reason: '这条消息里的图片既没有本机文件也没有下载地址' }
   }
 
-  if (!isFetchableImageUrl(url)) {
+  if (!isFetchableUrl(url)) {
     logger.warn(`[${pluginName}] 汤面图片地址被安全规则挡下，已跳过：${url}`)
     return { ok: false, reason: '图片地址指向的是云元数据之类的特殊地址，出于安全没有去拉' }
   }

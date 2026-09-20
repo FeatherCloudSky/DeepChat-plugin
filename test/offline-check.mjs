@@ -1771,34 +1771,38 @@ console.log('\n=== 6.13 人设预设与切换 ===')
 
   const evt = (over = {}) => mockEvent({ isGroup: true, group_id: 660011, user_id: 10001, ...over })
 
+  const promptsDir = Prompt.promptDir()
+  fs.rmSync(promptsDir, { recursive: true, force: true })
+
   Cfg.set('prompt', '默认人设：普通猫娘')
-  Cfg.set('promptList', [
-    { title: '严肃助手', content: '你是严肃的助手。' },
-    { title: '猫粮推销员', content: '你是推销猫粮的。' },
-    { title: '', content: '' }
-  ])
+  Cfg.set('promptList', [])
   Cfg.set('masterQQ', '10001')
   Cfg.set('adminQQ', [])
 
+  check('人设目录一开始是空的', Prompt.presetList().length, 0)
+
+  const saveOne = evt({ msg: '#设置人设 严肃助手 你是严肃的助手。' })
+  await manageApp.savePrompt(saveOne)
+  checkTrue('保存人设成功', /已保存人设/.test(saveOne.__replied[0] || ''))
+  check('人设存成了独立文件', fs.existsSync(path.join(promptsDir, '严肃助手.json')), true)
+
+  const saveTwo = evt({ msg: '#设置人设 猫粮推销员 你是推销猫粮的。' })
+  await manageApp.savePrompt(saveTwo)
+
   const list = Prompt.presetList()
-  check('预设列表：过滤掉空行', list.length, 2)
-  check('预设列表：序号从 1 开始', list.map((p) => p.index), [1, 2])
-  check('预设列表：带出名字', list.map((p) => p.title), ['严肃助手', '猫粮推销员'])
-  check('面板没配时列表为空', (() => {
-    Cfg.set('promptList', [])
-    const empty = Prompt.presetList().length
-    Cfg.set('promptList', [
-      { title: '严肃助手', content: '你是严肃的助手。' },
-      { title: '猫粮推销员', content: '你是推销猫粮的。' },
-      { title: '', content: '' }
-    ])
-    return empty
-  })(), 0)
+  check('列表按文件来', list.map((p) => p.title), ['严肃助手', '猫粮推销员'])
+  check('序号从 1 开始', list.map((p) => p.index), [1, 2])
+  check('文件里存着内容', list[0].content, '你是严肃的助手。')
 
   check('按序号找人设', Prompt.findPreset('2')?.title, '猫粮推销员')
   check('按名字找人设', Prompt.findPreset('严肃助手')?.index, 1)
   check('名字可以部分匹配', Prompt.findPreset('推销')?.index, 2)
   check('找不到返回 null', Prompt.findPreset('不存在的人设'), null)
+
+  const notMasterSave = evt({ user_id: 20002, msg: '#设置人设 坏人 不该存进去' })
+  await manageApp.savePrompt(notMasterSave)
+  checkTrue('非主人不能设置人设', /只有主人/.test(notMasterSave.__replied[0] || ''))
+  check('被拒之后确实没写文件', fs.existsSync(path.join(promptsDir, '坏人.json')), false)
 
   const plain = evt()
   check('没切过时用面板默认', Prompt.activePrompt(plain).from, '面板默认')
@@ -1812,7 +1816,8 @@ console.log('\n=== 6.13 人设预设与切换 ===')
   await manageApp.switchPrompt(byIndex)
   checkTrue('主人按序号切换', /人设 1\. 严肃助手/.test(byIndex.__replied[0] || ''))
   check('切换后立刻生效', Prompt.activePrompt(byIndex).content, '你是严肃的助手。')
-  check('选择写进了会话状态', ChatState.getPromptIndex(byIndex), 1)
+  check('会话里记的是文件名（序号会变，名字不会）',
+    ChatState.getPromptChoice(byIndex), '严肃助手')
 
   const byName = evt({ msg: '#切换提示词 猫粮推销员' })
   await manageApp.switchPrompt(byName)
@@ -1828,14 +1833,14 @@ console.log('\n=== 6.13 人设预设与切换 ===')
 
   const back = evt({ msg: '#切换提示词0' })
   await manageApp.switchPrompt(back)
-  check('切回默认后不再有会话选择', ChatState.getPromptIndex(back), null)
+  check('切回默认后不再有会话选择', ChatState.getPromptChoice(back), null)
   check('回到面板默认人设', Prompt.activePrompt(back).content, '默认人设：普通猫娘')
 
   // 并行：不同会话各用各的
   const groupA = evt({ group_id: 660011 })
   const groupB = evt({ group_id: 660012 })
-  ChatState.setPromptIndex(groupA, 1)
-  ChatState.setPromptIndex(groupB, 2)
+  ChatState.setPromptChoice(groupA, '严肃助手')
+  ChatState.setPromptChoice(groupB, '猫粮推销员')
   check('A 群用人设 1', Prompt.activePrompt(groupA).title, '严肃助手')
   check('B 群同时用人设 2', Prompt.activePrompt(groupB).title, '猫粮推销员')
 
@@ -1853,13 +1858,76 @@ console.log('\n=== 6.13 人设预设与切换 ===')
   checkTrue('系统提示词用上选中的人设', /你是严肃的助手。/.test(sysMsg.content))
   checkTrue('系统提示词标出人设名', /（严肃助手）/.test(sysMsg.content))
 
+  // 引用一条带 txt 文档的消息：人设内容从文件里读
+  const txtFixture = path.join(pluginDir, 'data', 'tmp', 'card.txt')
+  fs.mkdirSync(path.dirname(txtFixture), { recursive: true })
+  fs.writeFileSync(txtFixture, '\uFEFF角色卡：这是从 txt 文档读进来的长人设。')
+
+  const txtQuoted = { message_id: 'txt-1', message: [{ type: 'file', file: txtFixture, name: 'card.txt' }] }
+  const fromTxt = evt({
+    msg: '#设置人设 文件人设',
+    message: [{ type: 'reply', id: 'txt-1' }, { type: 'text', text: '#设置人设 文件人设' }],
+    group: { getChatHistory: async () => [txtQuoted] }
+  })
+  await manageApp.savePrompt(fromTxt)
+  checkTrue('引用 txt 能存人设', /已保存人设/.test(fromTxt.__replied[0] || ''))
+  checkTrue('回复里说明来源是文件', /文本文件/.test(fromTxt.__replied[0] || ''))
+  check('txt 内容进人设了（BOM 也清掉）',
+    Prompt.findPreset('文件人设')?.content, '角色卡：这是从 txt 文档读进来的长人设。')
+
+  // OneBot v11 那种 { type:'file', data:{ file } } 也要认
+  const ob11Quoted = { message_id: 'txt-2', message: [{ type: 'file', data: { file: txtFixture, name: 'card.txt' } }] }
+  const fromOb11 = evt({
+    msg: '#设置人设 OB11人设',
+    message: [{ type: 'reply', id: 'txt-2' }],
+    group: { getChatHistory: async () => [ob11Quoted] }
+  })
+  await manageApp.savePrompt(fromOb11)
+  checkTrue('OneBot 结构的文件段也能读', /已保存人设/.test(fromOb11.__replied[0] || ''))
+
+  fs.rmSync(txtFixture, { force: true })
+
+  const del = evt({ msg: '#删除人设 文件人设' })
+  await manageApp.removePrompt(del)
+  checkTrue('删除人设', /已删除人设/.test(del.__replied[0] || ''))
+  check('人设文件也删了', fs.existsSync(path.join(promptsDir, '文件人设.json')), false)
+
+  // 面板那一栏：只回名字、不回内容（内容进了请求体就会撞 100KB 的 413）
+  const rows = Prompt.panelRows()
+  checkTrue('面板行不带内容', rows.every((row) => row.content === ''), true)
+  checkTrue('面板行带文件名和显示名', rows.every((row) => row.key && row.title))
+
+  Prompt.applyPanelRows(rows.map((row) => (row.key === '严肃助手' ? { ...row, title: '严肃助手改' } : row)))
+  check('面板改显示名 → 文件跟着改名', fs.existsSync(path.join(promptsDir, '严肃助手改.json')), true)
+  check('改名后旧文件不再留着', fs.existsSync(path.join(promptsDir, '严肃助手.json')), false)
+
+  Prompt.applyPanelRows(Prompt.panelRows().map((row) => (
+    row.key === '严肃助手改' ? { ...row, content: '面板填的新内容' } : row
+  )))
+  check('面板填了内容就覆盖文件', Prompt.findPreset('严肃助手改')?.content, '面板填的新内容')
+
+  const kept = Prompt.findPreset('严肃助手改')?.content
+  Prompt.applyPanelRows(Prompt.panelRows())
+  check('内容留空则保持文件里原有的', Prompt.findPreset('严肃助手改')?.content, kept)
+
+  const allRows = Prompt.panelRows()
+  const removed = Prompt.applyPanelRows(allRows.slice(0, allRows.length - 1))
+  check('面板删掉一整行 = 删掉这个人设', removed.removed, 1)
+
+  // 老版本存在面板 promptList 里的预设：目录不存在时自动搬成文件
+  fs.rmSync(promptsDir, { recursive: true, force: true })
+  Cfg.set('promptList', [{ title: '老预设', content: '老内容' }])
+  check('老预设自动搬进文件', Prompt.presetList()[0]?.title, '老预设')
+  check('搬完之后就是文件了', fs.existsSync(path.join(promptsDir, '老预设.json')), true)
+
+  fs.rmSync(promptsDir, { recursive: true, force: true })
   Cfg.set('promptList', [])
   Cfg.set('masterQQ', '')
   ChatState.clearAll()
 }
 
 console.log('\n=== 7. 清理测试产生的文件 ===')
-const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json', 'data/soup', 'data/tmp']
+const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json', 'data/soup', 'data/tmp', 'data/prompts']
 for (const rel of leftovers) {
   const p = path.join(pluginDir, rel)
   if (!fs.existsSync(p)) { console.log(`  ${rel} 不存在（无需清理）`); continue }

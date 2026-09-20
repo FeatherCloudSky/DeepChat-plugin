@@ -177,6 +177,43 @@ export function firstDefined(...values) {
   return undefined
 }
 
+/** 这些地址不给拉：云厂商的元数据服务，SSRF 最经典的目标 */
+const BLOCKED_META_HOSTS = new Set([
+  '100.100.100.200',            // 阿里云元数据
+  '169.254.169.254',            // AWS / GCP / Azure 元数据
+  'metadata.google.internal',
+  'metadata.tencentyun.com'
+])
+
+/**
+ * 「这个 http(s) 地址值不值得去拉」—— 比 isPublicHttpUrl 宽一档：
+ * **允许本机 / 内网地址**。
+ *
+ * 因为不少适配器（OneBot 系的 NapCat、Lagrange）是拿本机的一个 HTTP 端口
+ * 供图和供文件的，地址就是 http://127.0.0.1:xxxx/xxx —— 按「只收公网」的
+ * 规矩会把这整类资源挡掉，表现就是「明明有图/有文件，插件却拿不到」。
+ *
+ * 仍然挡：非 http(s) 协议、链路本地 / 组播地址，以及上面那几个元数据地址。
+ */
+export function isFetchableUrl(value) {
+  let url
+  try {
+    url = new URL(String(value ?? ''))
+  } catch (error) {
+    return false
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+
+  const host = url.hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
+  if (!host) return false
+  if (BLOCKED_META_HOSTS.has(host)) return false
+  if (/^169\.254\./.test(host)) return false        // IPv4 链路本地
+  if (/^fe80:/i.test(host)) return false            // IPv6 链路本地
+  if (/^ff/i.test(host)) return false               // 组播
+  if (/^(0|22[4-9]|23\d|24\d|25[0-5])\./.test(host)) return false
+  return true
+}
+
 /**
  * 这条消息引用了哪条消息（QQ 的「引用回复」）。
  * 三个来源都试一遍：Yunzai 的 e.reply_id、e.source、以及消息段里的 reply 段。
