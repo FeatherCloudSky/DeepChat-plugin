@@ -1915,6 +1915,26 @@ console.log('\n=== 6.13 人设预设与切换 ===')
   check('私聊号也不会串到群里',
     Prompt.activePrompt(evt({ isGroup: true, group_id: 10001 })).from, '面板默认文本')
 
+  // 列表输出：只说「包含当前群/私聊」，不列出别处的任何号码
+  {
+    const hereGroup = evt({ group_id: 660011 })
+    await manageApp.promptList(hereGroup)
+    const groupText = hereGroup.__replied.join('\n')
+    checkTrue('列表标出「包含当前群」', /［包含当前群］/.test(groupText))
+    checkTrue('列表里没有别处的群号', !/6600\d\d/.test(groupText))
+    checkTrue('列表不暴露文件路径', !/data\/prompts|\/home\/|\.json/.test(groupText))
+
+    const otherGroup = evt({ group_id: 660099 })
+    await manageApp.promptList(otherGroup)
+    checkTrue('没被分配的会话不会乱标', !/包含当前群/.test(otherGroup.__replied.join('\n')))
+
+    const herePrivate = evt({ isGroup: false, user_id: 10001 })
+    await manageApp.promptList(herePrivate)
+    const privateText = herePrivate.__replied.join('\n')
+    checkTrue('列表标出「包含当前私聊」', /［包含当前私聊］/.test(privateText))
+    checkTrue('列表里没有别处的 QQ 号', !/10001/.test(privateText))
+  }
+
   const manual = evt({ group_id: 660011 })
   ChatState.setPromptChoice(manual, '私聊用人设')
   check('手动切换优先于面板安排', Prompt.activePrompt(manual).title, '私聊用人设')

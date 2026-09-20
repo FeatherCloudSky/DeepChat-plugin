@@ -314,7 +314,9 @@ export function applyPanelRows(rows) {
 export function describeList(e) {
   const list = presetList()
   const active = activePrompt(e)
-  const lines = [`【人设列表】目录：${promptDir()}`]
+  const isGroup = Boolean(e?.isGroup)
+  const sessionId = String((isGroup ? e?.group_id : e?.user_id) ?? '')
+  const lines = ['【人设列表】']
 
   if (list.length === 0) {
     lines.push('还没有人设文件。新增：#设置人设 名字 内容，或引用一条消息发 #设置人设 名字。')
@@ -324,12 +326,14 @@ export function describeList(e) {
       const size = preset.content.length > 0
         ? `（${preset.content.length} 字 / ${(Buffer.byteLength(preset.content, 'utf8') / 1024).toFixed(1)}KB）`
         : '（空）'
-      const where = []
-      if (preset.groups.length > 0) where.push(`群 ${preset.groups.join('、')}`)
-      if (preset.users.length > 0) where.push(`私聊 ${preset.users.join('、')}`)
-      lines.push(`${preset.index}. ${preset.title}${size}${where.length > 0 ? `　→ ${where.join('，')}` : ''}${mark}`)
+      // 只说「包含当前会话」，**绝不列出**别处的群号 / QQ 号 —— 那是别人的隐私。
+      // 完整的分配关系在锅巴面板里看。
+      const here = sessionId && (isGroup
+        ? idIn(preset.groups, sessionId)
+        : idIn(preset.users, sessionId))
+      lines.push(`${preset.index}. ${preset.title}${size}${here ? `［包含当前${isGroup ? '群' : '私聊'}］` : ''}${mark}`)
     }
-    lines.push('', `当前生效：${active.key ? active.title : '面板里的默认人设'}（来自${active.from}）`)
+    lines.push('', `当前生效：${active.key ? active.title : '面板里的默认人设'}（${active.from}）`)
   }
 
   lines.push('切换： #切换提示词1　/　#切换提示词 名字　/　#切换提示词0（回到面板安排）')

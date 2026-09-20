@@ -192,7 +192,7 @@ export class manage extends plugin {
     if (arg === '0' || arg === '默认' || arg === '默认人设') {
       ChatState.clearPromptChoice(e)
       const { from } = Prompt.activePrompt(e)
-      return e.reply(`已把${this.sessionName(e)}的人设交回面板安排，当前生效的来自${from}。`)
+      return e.reply(`已把本会话的人设交回面板安排，当前生效的来自${from}。`)
     }
 
     const preset = Prompt.findPreset(arg)
@@ -200,7 +200,7 @@ export class manage extends plugin {
 
     ChatState.setPromptChoice(e, preset.key)
     return e.reply(
-      `已把${this.sessionName(e)}切换到人设 ${preset.index}. ${preset.title}。\n` +
+      `已把本会话切换到人设 ${preset.index}. ${preset.title}。\n` +
       '这个会话之后的回复都用这套人设；发 #切换提示词0 可以回到面板默认。'
     )
   }
@@ -243,8 +243,7 @@ export class manage extends plugin {
 
     return e.reply(
       `已保存人设「${saved.title}」（${content.length} 字，来自${source}）。\n` +
-      `切换到它：#切换提示词 ${saved.title}\n` +
-      `文件：${saved.file}`
+      `切换到它：#切换提示词 ${saved.title}`
     )
   }
 
