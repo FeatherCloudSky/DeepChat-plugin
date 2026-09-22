@@ -1984,6 +1984,107 @@ console.log('\n=== 6.13 人设预设与切换 ===')
   ChatState.clearAll()
 }
 
+// ============================================================ 6.14 思考强度
+console.log('\n=== 6.14 思考强度 ===')
+check('归一化：大写转小写', Provider.normalizeReasoningEffort('HIGH'), 'high')
+check('归一化：合法值原样', Provider.normalizeReasoningEffort('max'), 'max')
+check('归一化：非法值归到不发送', Provider.normalizeReasoningEffort('ultra'), '')
+check('归一化：null 归到不发送', Provider.normalizeReasoningEffort(null), '')
+check('默认配置为不发送', Cfg.get('reasoningEffort', ''), '')
+
+const msgOne = [{ role: 'user', content: 'hi' }]
+
+const effortOff = Provider.buildRequestBody('openai', {
+  model: 'm', messages: msgOne, temperature: 1, maxTokens: 8, reasoningEffort: 'off'
+})
+check('off 翻译成 reasoning_effort=none', effortOff.reasoning_effort, 'none')
+
+const effortMax = Provider.buildRequestBody('openai', {
+  model: 'm', messages: msgOne, temperature: 1, maxTokens: 8, reasoningEffort: 'max'
+})
+check('max 按字面发送', effortMax.reasoning_effort, 'max')
+
+const effortHigh = Provider.buildRequestBody('openai', {
+  model: 'm', messages: msgOne, temperature: 1, maxTokens: 8, reasoningEffort: 'high'
+})
+check('high 按字面发送', effortHigh.reasoning_effort, 'high')
+
+const effortEmpty = Provider.buildRequestBody('openai', {
+  model: 'm', messages: msgOne, temperature: 1, maxTokens: 8, reasoningEffort: ''
+})
+check('不发送时没有 reasoning_effort 字段', 'reasoning_effort' in effortEmpty, false)
+
+const effortBad = Provider.buildRequestBody('openai', {
+  model: 'm', messages: msgOne, temperature: 1, maxTokens: 8, reasoningEffort: 'ultra'
+})
+check('非法档位不发送该字段', 'reasoning_effort' in effortBad, false)
+
+const anthOff = Provider.buildRequestBody('anthropic', {
+  model: 'm', messages: msgOne, temperature: 0.7, maxTokens: 128, reasoningEffort: 'off'
+})
+check('Anthropic off 显式关闭思考', anthOff.thinking, { type: 'disabled' })
+check('Anthropic off 保留 temperature', anthOff.temperature, 0.7)
+
+const anthHigh = Provider.buildRequestBody('anthropic', {
+  model: 'm', messages: msgOne, temperature: 0.7, maxTokens: 128, reasoningEffort: 'high'
+})
+check('Anthropic high 映射到思考预算', anthHigh.thinking, { type: 'enabled', budget_tokens: 16384 })
+check('Anthropic 开思考时 max_tokens 加上预算', anthHigh.max_tokens, 128 + 16384)
+check('Anthropic 开思考时不发 temperature', 'temperature' in anthHigh, false)
+
+const anthEmpty = Provider.buildRequestBody('anthropic', {
+  model: 'm', messages: msgOne, temperature: 0.7, maxTokens: 128
+})
+check('Anthropic 不发送时没有 thinking 字段', 'thinking' in anthEmpty, false)
+check('Anthropic 不发送时 max_tokens 不变', anthEmpty.max_tokens, 128)
+
+// max 降档：假 API 对 max 返回 400（模拟 MiMo 没有 max 档），对 high 正常回复
+{
+  const http = await import('node:http')
+  const seenEfforts = []
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => { body += c })
+    req.on('end', () => {
+      const parsed = JSON.parse(body)
+      seenEfforts.push(parsed.reasoning_effort)
+      if (parsed.reasoning_effort === 'max') {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'Invalid request parameters' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '降档成功。' } }] }))
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+
+  Cfg.set('apiUrl', `http://127.0.0.1:${port}/v1`)
+  Cfg.set('apiKey', 'sk-test')
+  Cfg.set('model', 'test-model')
+  Cfg.set('attemptMax', 1)
+  Cfg.set('useAnthropic', false)
+  Cfg.set('reasoningEffort', 'max')
+
+  const answer = await Provider.chat({ messages: msgOne, temperature: 1, maxTokens: 32 })
+  check('max 被拒后自动降档拿到回复', answer, '降档成功。')
+  check('第一次发的是 max', seenEfforts[0], 'max')
+  check('降档后发的是 high', seenEfforts[1], 'high')
+  check('降档只重试一次', seenEfforts.length, 2)
+  checkTrue('降档写了警告日志', logs.some(([lv, m]) => lv === 'warn' && /思考强度 max/.test(m)))
+
+  // 非 max 档位被拒不触发降档
+  Cfg.set('reasoningEffort', 'high')
+  seenEfforts.length = 0
+  const answerHigh = await Provider.chat({ messages: msgOne, temperature: 1, maxTokens: 32 })
+  check('high 档正常拿到回复', answerHigh, '降档成功。')
+  check('high 档只发一次', seenEfforts.length, 1)
+
+  Cfg.set('reasoningEffort', '')
+  await new Promise((resolve) => server.close(resolve))
+}
+
 console.log('\n=== 7. 清理测试产生的文件 ===')
 const leftovers = ['data/cfg.json', 'data/state.json', 'data/record', 'data/broadcast.json', 'data/soup', 'data/tmp', 'data/prompts']
 for (const rel of leftovers) {

@@ -274,6 +274,7 @@ export class manage extends plugin {
       `判定来源：${source}${override === null ? '' : '（会话单独设置）'}`,
       `协议：${info.provider}　地址：${info.base}${info.fallback ? '（未填写，回落默认）' : ''}`,
       `模型：${info.model}`,
+      `思考强度：${info.reasoningEffort}`,
       `Key 数量：${info.keyCount}`,
       `传输层：${info.transport}${info.transport === 'fetch' ? '' : '（Node 16 兜底）'}`,
       `主人：${perm.master}`,

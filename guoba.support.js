@@ -276,6 +276,22 @@ export function supportGuoba() {
           component: 'InputNumber',
           componentProps: { min: 16, max: 65536, step: 1, placeholder: '512' }
         },
+        {
+          field: 'reasoningEffort',
+          label: '模型思考强度',
+          bottomHelpMessage: '推理模型的思考预算。off=关闭思考（发送 reasoning_effort=none）；max=拉满，服务商不认 max 时自动降到 high。「不发送」= 不带这个参数，最兼容。Anthropic 协议会翻译成 thinking.budget_tokens',
+          component: 'Select',
+          componentProps: {
+            options: [
+              { label: '不发送（默认，最兼容）', value: '' },
+              { label: 'off — 不思考', value: 'off' },
+              { label: 'low — 轻度思考', value: 'low' },
+              { label: 'medium — 中等思考', value: 'medium' },
+              { label: 'high — 深度思考', value: 'high' },
+              { label: 'max — 拉满（无此档时退 high）', value: 'max' }
+            ]
+          }
+        },
 
         // ---------------------------------------------------------- 分条发送
         { label: '分条发送', component: 'SOFT_GROUP_BEGIN' },

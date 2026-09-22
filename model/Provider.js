@@ -37,6 +37,51 @@ export function normalizeImageDetail(value) {
   return IMAGE_DETAIL_LEVELS.includes(level) ? level : ''
 }
 
+/**
+ * 思考强度（推理档位）。用户侧五档：off / low / medium / high / max，
+ * 外加 ''（不发送该参数，保持服务商默认行为）。
+ *
+ * 各家 API 的值域并不统一（2026-09 实测）：
+ *   - MiMo (mimo-v2.6-pro)：只认 none / low / medium / high —— 没有 max
+ *   - DeepSeek (deepseek-flash)：认 none / minimal / low / medium / high / max / xhigh
+ * 所以发送前翻译一次：off -> none（关闭思考），其余按字面发送；
+ * max 在服务商不认时由 chat() 自动降档到 high 重试（见那里的降级逻辑）。
+ */
+export const REASONING_LEVELS = ['', 'off', 'low', 'medium', 'high', 'max']
+
+const REASONING_EFFORT_WIRE = {
+  off: 'none',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  max: 'max'
+}
+
+/**
+ * Anthropic 协议没有 reasoning_effort，思考预算用 thinking.budget_tokens 表达。
+ * off 显式关闭；其余档位映射到固定预算（budget_tokens 最低 1024）。
+ */
+const ANTHROPIC_THINKING_BUDGET = {
+  off: 0,
+  low: 1024,
+  medium: 4096,
+  high: 16384,
+  max: 32768
+}
+
+export function normalizeReasoningEffort(value) {
+  const level = String(value ?? '').trim().toLowerCase()
+  return REASONING_LEVELS.includes(level) ? level : ''
+}
+
+/** Anthropic 的 thinking 参数。undefined = 不发送这个字段 */
+export function anthropicThinkingFor(effort) {
+  const level = normalizeReasoningEffort(effort)
+  if (!level) return undefined
+  if (level === 'off') return { type: 'disabled' }
+  return { type: 'enabled', budget_tokens: ANTHROPIC_THINKING_BUDGET[level] }
+}
+
 function normalizeBase(url) {
   return String(url ?? '').trim().replace(/\/+$/, '')
 }
@@ -224,20 +269,28 @@ export function toAnthropicMessages(messages) {
 }
 
 /** 构造请求体，抽成独立函数便于单测 */
-export function buildRequestBody(provider, { model, messages, temperature, maxTokens, imageDetail }) {
+export function buildRequestBody(provider, { model, messages, temperature, maxTokens, imageDetail, reasoningEffort }) {
+  const effort = normalizeReasoningEffort(reasoningEffort)
+
   if (provider === 'anthropic') {
     const { system, messages: dialog } = toAnthropicMessages(messages)
+    const thinking = anthropicThinkingFor(effort)
+    const budget = thinking && thinking.type === 'enabled' ? thinking.budget_tokens : 0
+
     const body = {
       model,
-      max_tokens: maxTokens,
-      temperature,
+      // 开思考时预算也算在 max_tokens 里，把回答的余量加上
+      max_tokens: budget > 0 ? maxTokens + budget : maxTokens,
       messages: dialog
     }
+    // 开思考时 Anthropic 只接受默认温度，干脆不发这个字段
+    if (budget === 0) body.temperature = temperature
+    if (thinking) body.thinking = thinking
     if (system) body.system = system
     return body
   }
 
-  return {
+  const body = {
     model,
     messages: messages.map((message) => ({
       role: message.role,
@@ -247,6 +300,9 @@ export function buildRequestBody(provider, { model, messages, temperature, maxTo
     max_tokens: maxTokens,
     stream: false
   }
+  // off 翻译成 none（关闭思考）；'' 表示不发送该字段，保持服务商默认行为
+  if (effort) body.reasoning_effort = REASONING_EFFORT_WIRE[effort]
+  return body
 }
 
 function buildHeaders(provider, apiKey, anthropicVersion) {
@@ -326,15 +382,18 @@ async function chat(options = {}) {
   }
 
   const url = buildUrl(provider, base)
-  const body = buildRequestBody(provider, {
+  let effort = normalizeReasoningEffort(options.reasoningEffort ?? Cfg.get('reasoningEffort', ''))
+  const makeBody = (level) => buildRequestBody(provider, {
     model,
     messages: cleanMessages,
     temperature,
     maxTokens,
     anthropicVersion,
+    reasoningEffort: level,
     // detail 是 OpenAI 兼容协议里 image_url 的字段，Anthropic 的 image 块没有它
     imageDetail: provider === 'openai' ? normalizeImageDetail(Cfg.get('imageDetail', '')) : ''
   })
+  let body = makeBody(effort)
   const headers = buildHeaders(provider, apiKey, anthropicVersion)
 
   for (let attempt = 1; attempt <= attemptMax; attempt++) {
@@ -342,6 +401,15 @@ async function chat(options = {}) {
       const result = await postJson(url, headers, body, timeoutMs)
 
       if (!result.ok) {
+        // 有些服务商没有 max 档（实测 MiMo 最高就到 high）。选了 max 又被
+        // 400 / 422 拒绝时自动降档到 high 重试并记日志，不让整条回复链路失败。
+        if (effort === 'max' && (result.status === 400 || result.status === 422)) {
+          effort = 'high'
+          body = makeBody(effort)
+          logger.warn(`[${pluginName}] 服务商不接受思考强度 max（HTTP ${result.status}），已自动降档到 high 重试`)
+          attempt-- // 降档那一次不消耗重试次数
+          continue
+        }
         throw new Error(`${extractErrorMessage(result)}`)
       }
 
@@ -375,6 +443,7 @@ function describe() {
     fallback,
     keyCount: keys.length,
     model: Cfg.get('model', '') || PROVIDER_DEFAULT_MODEL[provider],
+    reasoningEffort: normalizeReasoningEffort(Cfg.get('reasoningEffort', '')) || '(不发送)',
     transport: transportName()
   }
 }
@@ -388,7 +457,10 @@ export default {
   buildUrl,
   partsToPlainText,
   hasContent,
-  normalizeImageDetail
+  normalizeImageDetail,
+  normalizeReasoningEffort,
+  anthropicThinkingFor,
+  REASONING_LEVELS
 }
 
 export { PROVIDER_DEFAULTS, PROVIDER_DEFAULT_MODEL }

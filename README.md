@@ -39,6 +39,7 @@ AI 名称与关键词触发、图片识别、引用图片、每会话开关、�
 | 触发关键词 | 至多 20 个，命中任意一个即触发；纯字面匹配，适合放 AI 的别名 |
 | 是否在检测到 AI 名称时触发 | 「名字触发回复」开关 |
 | 温度 / token 上限 | 主动模式与伪人模式各有一套 |
+| 模型思考强度 | off / low / medium / high / max 五档；自动翻译成各家参数（off→none），服务商不认 max 时自动降档 high |
 | 是否被艾特时回复 | 「被艾特时回复」开关 |
 | 是否允许私聊使用 | 「允许私聊使用」总开关 |
 | **每个群、每个私聊独立开关** | 面板里的启用/停用列表 + 聊天命令 `#chat开` / `#chat关` |
@@ -287,6 +288,38 @@ return false
 5. 全局「默认启用 AI」
 
 伪人模式的触发另有群 / 用户黑白名单，只影响**被动接话**，不影响 `#chat` 和艾特。
+
+## 模型思考强度（推理档位）
+
+推理模型（MiMo-V2.6 系、DeepSeek-V4 系、o 系 / GPT-5 等）的「思考」预算可以控制。
+面板「基本配置 → 模型思考强度」五档：**off / low / medium / high / max**，外加默认的「不发送」。
+
+| 你选的档位 | OpenAI 兼容协议实际发送 | Anthropic 协议实际发送 |
+|---|---|---|
+| 不发送（默认） | 不带该字段 | 不带 `thinking` 字段 |
+| off | `reasoning_effort: "none"` | `thinking: {"type":"disabled"}` |
+| low | `reasoning_effort: "low"` | `budget_tokens: 1024` |
+| medium | `reasoning_effort: "medium"` | `budget_tokens: 4096` |
+| high | `reasoning_effort: "high"` | `budget_tokens: 16384` |
+| max | `reasoning_effort: "max"` | `budget_tokens: 32768` |
+
+**为什么 off 不直接发字符串 `off`**：各家值域不统一。2026-09 实测：
+
+| `reasoning_effort` 的值 | MiMo (mimo-v2.6-pro) | DeepSeek (deepseek-flash) |
+|---|---|---|
+| `none` / `low` / `medium` / `high` | ✅ | ✅ |
+| `off` | ❌ 400 | ❌ 422 |
+| `minimal` | ❌ 400 | ✅ |
+| `max` | ❌ 400（它最高就到 high） | ✅ 思考量明显更大 |
+| `xhigh` | ❌ 400 | ✅ |
+
+- **max 自动降档**：服务商不认 `max`（HTTP 400 / 422）时，自动降到 `high` 重试并在日志里写明，
+  不让整条回复失败 —— 和「AI 名称正则写错退回关键词匹配」是同一套思路。
+- **Anthropic 开思考时**：`max_tokens` 自动加上思考预算（Anthropic 的预算算在 max_tokens 里，
+  不加会挤掉回答余量），并且不再发送 `temperature`（开思考时它只接受默认温度）。
+- 档位是**全局**的：主动模式和伪人模式共用。伪人模式嫌思考慢 / 贵，把它调低或选「不发送」。
+- 思考内容**不会**混进聊天回复：插件只取 `message.content`，MiMo / DeepSeek 返回的
+  `reasoning_content` 字段会被忽略。
 
 ## 图片输入
 

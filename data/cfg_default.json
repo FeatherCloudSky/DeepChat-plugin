@@ -26,6 +26,7 @@
   "thinking": false,
   "temperature": 1,
   "maxTokens": 512,
+  "reasoningEffort": "",
   "splitReply": true,
   "maxSplitSegments": 5,
   "noSplitOverLength": 500,
