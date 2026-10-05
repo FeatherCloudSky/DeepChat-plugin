@@ -15,14 +15,21 @@ import https from 'node:https'
 
 export const hasFetch = typeof globalThis.fetch === 'function'
 
-function toResult(status, text) {
+export function retryAfterMs(value, now = Date.now()) {
+  if (!value) return 0
+  const seconds = Number(value)
+  const wait = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now
+  return Number.isFinite(wait) ? Math.max(0, wait) : 0
+}
+
+function toResult(status, text, retryAfter) {
   let data = null
   try {
     data = JSON.parse(text)
   } catch {
     data = null
   }
-  return { ok: status >= 200 && status < 300, status, data, text }
+  return { ok: status >= 200 && status < 300, status, data, text, retryAfterMs: retryAfterMs(retryAfter) }
 }
 
 async function postWithFetch(url, headers, payload, timeoutMs) {
@@ -35,7 +42,7 @@ async function postWithFetch(url, headers, payload, timeoutMs) {
       body: payload,
       signal: controller.signal
     })
-    return toResult(response.status, await response.text())
+    return toResult(response.status, await response.text(), response.headers.get('retry-after'))
   } finally {
     clearTimeout(timer)
   }
@@ -71,7 +78,7 @@ export function postWithNode(url, headers, payload, timeoutMs) {
         let text = ''
         response.setEncoding('utf8')
         response.on('data', (chunk) => { text += chunk })
-        response.on('end', () => resolve(toResult(response.statusCode, text)))
+        response.on('end', () => resolve(toResult(response.statusCode, text, response.headers['retry-after'])))
         response.on('error', reject)
       }
     )

@@ -39,7 +39,7 @@ export function imageCandidates(buffer) {
  *   协议端（NapCat）失败时返回 { status: 'failed', retcode: 1200, ... }。
  * 只判断「有没有抛错」会把失败当成功，然后静静地什么都不发。
  */
-function isSendFailed(res) {
+export function isSendFailed(res) {
   if (!res || typeof res !== 'object') return false
   if (res.error) return true
   if (res.status === 'failed') return true

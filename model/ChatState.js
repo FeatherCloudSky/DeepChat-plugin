@@ -9,16 +9,17 @@
  * {
  *   "groups": { "123456": true, "234567": false },
  *   "users":  { "10001": false },
- *   "groupPrompts": { "123456": 2 },
- *   "userPrompts":  { "10001": 1 }
+ *   "groupPrompts": { "123456": "群用人设" },
+ *   "userPrompts":  { "10001": "私聊人设" }
  * }
  * 未出现在这里的会话，走配置里的默认值 + 启用/禁用列表。
- * 后两个桶存的是「这个会话用人设预设里的第几套」（#切换提示词），
+ * 后两个桶存的是人设文件名（兼容旧版序号），
  * 没出现过就用面板里的默认人设。
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import { pluginData, pluginName } from '../config/constant.js'
+import { writeJsonAtomic } from './storage.js'
 
 const STATE_FILE = path.join(pluginData, 'state.json')
 
@@ -51,11 +52,20 @@ function load() {
  */
 function saveNow() {
   try {
-    fs.mkdirSync(pluginData, { recursive: true })
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, '\t'), 'utf8')
+    writeJsonAtomic(STATE_FILE, state)
+    return true
   } catch (error) {
     logger.error(`[${pluginName}] 保存 state.json 失败：${error.message || error}`)
+    return false
   }
+}
+
+function updateState(change) {
+  const previous = JSON.parse(JSON.stringify(state))
+  change()
+  if (saveNow()) return true
+  state = previous
+  return false
 }
 
 function bucket(e) {
@@ -80,21 +90,17 @@ const ChatState = {
   },
 
   setOverride(e, enabled) {
-    bucket(e)[sessionKey(e)] = Boolean(enabled)
-    saveNow()
-    return Boolean(enabled)
+    return updateState(() => { bucket(e)[sessionKey(e)] = Boolean(enabled) }) ? Boolean(enabled) : null
   },
 
   /** 清除单个会话的设置，回到默认策略 */
   clearOverride(e) {
-    delete bucket(e)[sessionKey(e)]
-    saveNow()
+    return updateState(() => { delete bucket(e)[sessionKey(e)] })
   },
 
   /** 清空所有会话设置 */
   clearAll() {
-    state = { groups: {}, users: {}, groupPrompts: {}, userPrompts: {} }
-    saveNow()
+    return updateState(() => { state = { groups: {}, users: {}, groupPrompts: {}, userPrompts: {} } })
   },
 
   /**
@@ -108,15 +114,12 @@ const ChatState = {
   },
 
   setPromptChoice(e, choice) {
-    promptBucket(e)[sessionKey(e)] = String(choice)
-    saveNow()
-    return String(choice)
+    return updateState(() => { promptBucket(e)[sessionKey(e)] = String(choice) }) ? String(choice) : null
   },
 
   /** 清除本会话的人设选择，回到面板默认 */
   clearPromptChoice(e) {
-    delete promptBucket(e)[sessionKey(e)]
-    saveNow()
+    return updateState(() => { delete promptBucket(e)[sessionKey(e)] })
   },
 
   /** 统计数量，供 #chat状态 展示 */

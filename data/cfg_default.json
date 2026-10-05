@@ -63,6 +63,8 @@
   "broadcastMaxGroups": 20,
   "historyCount": 7,
   "maxContextLength": 25,
+  "maxContextChars": 24000,
+  "sessionQueueLimit": 5,
   "cacheExpireMinutes": 60,
   "enableByDefault": true,
   "enabledGroups": [],

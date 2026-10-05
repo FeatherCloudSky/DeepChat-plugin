@@ -1,6 +1,6 @@
 {
   "name": "DeepChat-plugin",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "接入任意 OpenAI / Anthropic 兼容 API 的拟人聊天插件（Yunzai-Bot）",
   "main": "index.js",
   "type": "module",

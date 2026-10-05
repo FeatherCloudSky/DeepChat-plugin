@@ -342,9 +342,23 @@ export function supportGuoba() {
         {
           field: 'maxContextLength',
           label: '最大上下文长度',
-          bottomHelpMessage: '缓存里最多保留多少条对话消息（1 ~ 200）',
+          bottomHelpMessage: '请求和缓存按最近完整对话裁剪（1 ~ 200）；至少保留最新一轮，系统提示每次重新生成',
           component: 'InputNumber',
           componentProps: { min: 1, max: 200, step: 1, placeholder: '25' }
+        },
+        {
+          field: 'maxContextChars',
+          label: '上下文字符预算',
+          bottomHelpMessage: '请求文本含人设的总字符上限，超限先裁掉旧对话。当前消息或人设单独超限时提示缩短；图片字节不计入此预算',
+          component: 'InputNumber',
+          componentProps: { min: 1000, max: 1000000, step: 1000, placeholder: '24000' }
+        },
+        {
+          field: 'sessionQueueLimit',
+          label: '会话排队上限',
+          bottomHelpMessage: '每个群或私聊同时处理及等待的主动请求总数（1 ~ 50）。随机插话在会话忙碌时跳过',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 50, step: 1, placeholder: '5' }
         },
         {
           field: 'cacheExpireMinutes',
@@ -708,11 +722,13 @@ export function supportGuoba() {
 
       setConfigData(data, { Result }) {
         if (Array.isArray(data?.promptIndex)) {
-          Prompt.applyPanelRows(data.promptIndex)
+          if (!Prompt.applyPanelRows(data.promptIndex).ok) {
+            return Result.error('人设保存失败，请检查数据目录权限或磁盘空间，刷新面板后重试')
+          }
         }
         const plain = { ...data }
         delete plain.promptIndex        // 这栏只往文件里写，不进配置
-        Cfg.setMany(plain)
+        if (!Cfg.setMany(plain)) return Result.error('配置保存失败，请检查数据目录权限或磁盘空间')
         return Result.ok({}, '保存成功')
       }
     }

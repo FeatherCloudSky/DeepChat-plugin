@@ -6,6 +6,9 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { runIsolated } from './isolated-workspace.mjs'
+
+runIsolated(fileURLToPath(import.meta.url))
 
 // 插件根目录 = 本文件的上一级，因此在任何工作目录下运行都能定位到自己
 const pluginDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -817,11 +820,11 @@ console.log('\n=== 6.5 全链路：一条群消息 → 真实 API → 分条回�
   checkTrue('全链路：本次提问带发送者前缀',
     String(req1.messages[req1.messages.length - 1].content).includes('群友甲:'))
 
-  const cacheKey = `DeepChat-plugin:chat:group:987654`
+  const cacheKey = chatInstance.getCacheKey(first)
   checkTrue('全链路：上下文已写入缓存', redisStore.has(cacheKey))
   const cached = JSON.parse(redisStore.get(cacheKey) || '[]')
   check('全链路：缓存最后一条是 AI 的回复', cached[cached.length - 1]?.content, '第一句。第二句？第三句')
-  check('全链路：缓存里只有 system + 对话', cached[0].role, 'system')
+  check('全链路：缓存只存对话，系统提示每轮重建', cached[0].role, 'user')
 
   // 不满足触发条件的消息应当什么都不做
   const quiet = makeGroupEvent('今天天气不错')
@@ -992,7 +995,7 @@ console.log('\n=== 6.6 帮助出图与兜底 ===')
 
   // 发图用 e.reply(渲染结果) —— TRSS 渲染器自己的发法，实测这条能出图
   check('出图成功时发的是渲染结果', okEvent.__replied[0], 'BASE64_IMAGE_DATA')
-  check('传给渲染器的插件名 = 文件夹名', captured?.plugin, 'DeepChat-plugin')
+  check('传给渲染器的插件名 = 文件夹名', captured?.plugin, path.basename(pluginDir))
   check('传给渲染器的模板相对路径', captured?.tplPath, 'help/index')
   // 关键：默认模式下渲染器即使截图失败也返回 true，
   // 所以必须用 base64 模式把图拿回来自己判断
@@ -2050,7 +2053,7 @@ check('Anthropic 不发送时 max_tokens 不变', anthEmpty.max_tokens, 128)
       seenEfforts.push(parsed.reasoning_effort)
       if (parsed.reasoning_effort === 'max') {
         res.writeHead(400, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ error: { message: 'Invalid request parameters' } }))
+        res.end(JSON.stringify({ error: { param: 'reasoning_effort', message: 'Unsupported reasoning_effort: max; allowed values: none, low, medium, high' } }))
         return
       }
       res.writeHead(200, { 'content-type': 'application/json' })

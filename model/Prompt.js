@@ -24,6 +24,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import Cfg from './Cfg.js'
 import ChatState from './ChatState.js'
+import { writeJsonAtomic } from './storage.js'
 import { pluginData, pluginName } from '../config/constant.js'
 import { parseIdList, idIn } from './utils.js'
 
@@ -156,14 +157,13 @@ export function savePreset(title, content, extra = {}) {
   const existing = readPreset(`${key}.json`)
 
   try {
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(file, JSON.stringify({
+    writeJsonAtomic(file, {
       title: name,
       content: String(content ?? ''),
       groups: extra.groups !== undefined ? parseIdList(extra.groups) : parseIdList(existing?.groups),
       users: extra.users !== undefined ? parseIdList(extra.users) : parseIdList(existing?.users),
       updatedAt: Date.now()
-    }, null, 2), 'utf8')
+    })
   } catch (error) {
     logger.error(`[${pluginName}] 保存人设「${name}」失败：${error.message || error}`)
     return null
@@ -281,7 +281,7 @@ export function applyPanelRows(rows) {
       groups: row?.groups ?? existing?.groups ?? [],
       users: row?.users ?? existing?.users ?? []
     })
-    if (!result) continue
+    if (!result) return { ok: false, saved, removed: 0 }
     keep.add(result.key)
     saved++
 
@@ -292,6 +292,7 @@ export function applyPanelRows(rows) {
         fs.unlinkSync(existing.file)
       } catch (error) {
         logger.warn(`[${pluginName}] 重命名后删除旧人设文件失败：${error.message || error}`)
+        return { ok: false, saved, removed: 0 }
       }
     }
   }
@@ -304,6 +305,7 @@ export function applyPanelRows(rows) {
       removed++
     } catch (error) {
       logger.warn(`[${pluginName}] 删除人设文件失败：${error.message || error}`)
+      return { ok: false, saved, removed }
     }
   }
 

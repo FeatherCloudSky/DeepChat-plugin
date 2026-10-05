@@ -477,13 +477,14 @@ sudo fc-cache -f -v
 
 ## 自检
 
-插件自带两个脚本，不依赖 Yunzai 环境，克隆下来就能跑：
+插件自带三个检查脚本，不依赖 Yunzai 环境。所有写入测试都在临时副本执行，不会清理使用中的配置、会话状态或记录文件：
 
 ```shell
 cd plugins/DeepChat-plugin
 
 node test/offline-check.mjs        # 行为回归：协议转换、配置、策略、权限、拆条、全链路
 node test/consistency-check.mjs    # 一致性：配置键 / 面板字段 / 模板变量互相是否对得上
+node test/optimization-check.mjs   # 人设热更新、排队、预算、错误重试、保存失败与测试数据保护
 ```
 
 - `offline-check.mjs` 会 mock 掉 Yunzai 的 `plugin` / `logger` / `redis`，然后用一个**本地假 API 服务**
@@ -493,7 +494,17 @@ node test/consistency-check.mjs    # 一致性：配置键 / 面板字段 / 模�
   锅巴面板暴露的字段，是否都在 `cfg_default.json` 里有默认值；模板用的变量是否都由
   `buildRenderData()` 提供。这类问题普通单测发现不了，但上线就炸。
 
-两个脚本都以退出码表示结果，可以直接接进 CI。
+三个脚本都以退出码表示结果，可以直接接进 CI。优化回归也会运行前两个脚本，并核对测试前后的配置与状态文件保持一致。
+
+### 对话处理与容量设置
+
+每个群或私聊的请求按顺序处理，直到回复发送完毕；不同会话可以并行。`sessionQueueLimit` 默认 5，包含正在处理的请求，队列满时主动提问会得到提示，忙碌时随机插话跳过。
+
+系统提示每轮按当前人设与交互模式重新生成，切换人设后下一轮无需清空对话即可生效。Redis 只缓存对话，读取时兼容旧版含系统提示的缓存。`historyCount=0` 只关闭初始聊天记录补充，仍保留后续对话缓存。
+
+`maxContextLength` 和新增的 `maxContextChars`（默认 24000）共同约束上下文，旧对话按完整轮次移除；条数上限至少保留最新一轮。字符预算包含请求的人设与文本，图片字节不计入，也不等同于服务商的 token 限制。当前消息或人设本身超过预算时会提示缩短，不会悄悄截断问题。
+
+更新内容见 [CHANGELOG.md](./CHANGELOG.md)。
 
 | 文件 | 内容 |
 |---|---|

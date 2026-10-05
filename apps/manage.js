@@ -156,26 +156,26 @@ export class manage extends plugin {
     if (!e.isGroup && !Cfg.getBool('enablePrivate', true)) {
       return e.reply('私聊功能已被总开关关闭，请先在插件配置里开启「私聊中使用」。')
     }
-    ChatState.setOverride(e, true)
+    if (ChatState.setOverride(e, true) === null) return e.reply('保存失败，请检查数据目录权限或磁盘空间。')
     return e.reply(`已启用 ${this.sessionName(e)} 的 AI 对话。`)
   }
 
   async disable(e) {
     if (!this.canToggle(e)) return this.denyToggle(e)
-    ChatState.setOverride(e, false)
+    if (ChatState.setOverride(e, false) === null) return e.reply('保存失败，请检查数据目录权限或磁盘空间。')
     return e.reply(`已停用 ${this.sessionName(e)} 的 AI 对话。发送 #chat开 可以重新启用。`)
   }
 
   async reset(e) {
     if (!this.canToggle(e)) return this.denyToggle(e)
-    ChatState.clearOverride(e)
+    if (!ChatState.clearOverride(e)) return e.reply('保存失败，请检查数据目录权限或磁盘空间。')
     const { enabled, source } = Policy.describe(e)
     return e.reply(`已清除本会话的单独设置，当前状态：${enabled ? '启用' : '停用'}（来自${source}）。`)
   }
 
   async resetAll(e) {
     if (!Permission.isMaster(e)) return e.reply('只有主人才能执行这个操作。')
-    ChatState.clearAll()
+    if (!ChatState.clearAll()) return e.reply('保存失败，请检查数据目录权限或磁盘空间。')
     return e.reply('已清空所有会话级开关，全部回到配置里的默认策略。')
   }
 
@@ -190,7 +190,7 @@ export class manage extends plugin {
     if (!arg) return e.reply(Prompt.describeList(e))
 
     if (arg === '0' || arg === '默认' || arg === '默认人设') {
-      ChatState.clearPromptChoice(e)
+      if (!ChatState.clearPromptChoice(e)) return e.reply('保存失败，请检查数据目录权限或磁盘空间。')
       const { from } = Prompt.activePrompt(e)
       return e.reply(`已把本会话的人设交回面板安排，当前生效的来自${from}。`)
     }
@@ -198,7 +198,7 @@ export class manage extends plugin {
     const preset = Prompt.findPreset(arg)
     if (!preset) return e.reply(`没找到人设「${arg}」。\n\n${Prompt.describeList(e)}`)
 
-    ChatState.setPromptChoice(e, preset.key)
+    if (ChatState.setPromptChoice(e, preset.key) === null) return e.reply('保存失败，请检查数据目录权限或磁盘空间。')
     return e.reply(
       `已把本会话切换到人设 ${preset.index}. ${preset.title}。\n` +
       '这个会话之后的回复都用这套人设；发 #切换提示词0 可以回到面板默认。'

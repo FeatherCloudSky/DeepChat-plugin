@@ -10,6 +10,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { pluginData, pluginName } from '../config/constant.js'
 import { deepMerge, getByPath, setByPath } from './utils.js'
+import { writeJsonAtomic } from './storage.js'
 
 const DEFAULT_FILE = path.join(pluginData, 'cfg_default.json')
 const USER_FILE = path.join(pluginData, 'cfg.json')
@@ -121,22 +122,27 @@ const Cfg = {
   },
 
   set(key, value) {
+    const previous = Cfg.getAll()
     setByPath(cfg, key, value)
-    Cfg.save()
+    if (Cfg.save()) return true
+    cfg = previous
+    return false
   },
 
   /** 批量写入，只落盘一次（锅巴保存时会一次性传很多字段） */
   setMany(pairs) {
+    const previous = Cfg.getAll()
     for (const [key, value] of Object.entries(pairs ?? {})) {
       setByPath(cfg, key, value)
     }
-    return Cfg.save()
+    if (Cfg.save()) return true
+    cfg = previous
+    return false
   },
 
   save() {
     try {
-      fs.mkdirSync(pluginData, { recursive: true })
-      fs.writeFileSync(USER_FILE, JSON.stringify(Cfg.getAll(), null, '\t'), 'utf8')
+      writeJsonAtomic(USER_FILE, Cfg.getAll())
       return true
     } catch (error) {
       logger.error(`[${pluginName}] 保存 cfg.json 失败：${error.message || error}`)

@@ -10,7 +10,7 @@
  */
 import Cfg from './Cfg.js'
 import { pluginName } from '../config/constant.js'
-import { pickApiKey, isBlank } from './utils.js'
+import { pickApiKey, isBlank, sleep } from './utils.js'
 import { postJson, transportName } from './http.js'
 
 /** 未填写 apiUrl 时，按协议走官方默认地址 */
@@ -131,6 +131,26 @@ function extractErrorMessage(result) {
   if (typeof data?.error === 'string') return data.error
   if (data?.message) return data.message
   return String(result?.text ?? '').slice(0, 300) || `HTTP ${result?.status}`
+}
+
+/** 仅把固定、可公开的诊断交给用户和日志，不打印响应正文或密钥。 */
+export function classifyError(status, error) {
+  if (status === 401 || status === 403) return { type: 'auth', status, retryable: false, message: 'API 鉴权失败，请检查密钥或访问权限。' }
+  if (status === 429) return { type: 'rate_limit', status, retryable: true, message: '模型服务限流或额度不足，请稍后再试并检查额度。' }
+  if (status === 408 || error?.name === 'AbortError' || /超时|timeout/i.test(error?.message || '')) {
+    return { type: 'timeout', status, retryable: true, message: '模型请求超时，请稍后再试。' }
+  }
+  if (status >= 500 && status <= 599) return { type: 'server', status, retryable: true, message: '模型服务暂时异常，请稍后再试。' }
+  if (status >= 400) return { type: 'request', status, retryable: false, message: `模型请求被拒绝（HTTP ${status}），请检查地址、模型和参数。` }
+  if (error?.type === 'empty') return { type: 'empty', status, retryable: true, message: '模型返回内容为空，请稍后再试。' }
+  return { type: 'network', status: status || 0, retryable: true, message: '无法连接模型服务，请检查网络或 API 地址。' }
+}
+
+export function shouldDowngradeReasoning(provider, effort, result) {
+  if (provider !== 'openai' || effort !== 'max' || ![400, 422].includes(result.status)) return false
+  const detail = `${result.data?.error?.param || ''} ${extractErrorMessage(result)}`
+  return /reasoning[_\s-]*effort/i.test(detail) &&
+    /invalid|unsupported|not supported|must be|allowed|不支持|无效/i.test(detail)
 }
 
 /**
@@ -354,22 +374,28 @@ export function buildUrl(provider, base) {
  * @returns {Promise<string|null>} 成功返回文本，失败返回 null
  */
 async function chat(options = {}) {
+  const report = (failure) => {
+    if (typeof options.onError === 'function') options.onError(failure)
+    return null
+  }
   const apiKey = pickApiKey(Cfg.get('apiKey', ''))
   if (!apiKey) {
     logger.error(`[${pluginName}] 未配置 API Key，功能不可用。请在「插件配置 → DeepChat-plugin」中填写。`)
-    return null
+    return report({ type: 'config', status: 0, retryable: false, message: '尚未配置 API 密钥，请在插件面板中填写。' })
   }
 
   const { provider, base, fallback } = resolveEndpoint()
   const model = options.model || Cfg.get('model', '') || PROVIDER_DEFAULT_MODEL[provider]
-  const temperature = Number(options.temperature ?? Cfg.get('temperature', 1))
-  const maxTokens = Number(options.maxTokens ?? Cfg.get('maxTokens', 512))
+  const rawTemperature = Number(options.temperature ?? Cfg.get('temperature', 1))
+  const temperature = Number.isFinite(rawTemperature) ? Math.max(0, Math.min(2, rawTemperature)) : 1
+  const rawMaxTokens = Number(options.maxTokens ?? Cfg.get('maxTokens', 512))
+  const maxTokens = Number.isFinite(rawMaxTokens) ? Math.max(1, Math.floor(rawMaxTokens)) : 512
   const timeoutMs = Cfg.getNumber('timeoutMs', 60000, 1000, 600000)
   const attemptMax = Cfg.getNumber('attemptMax', 2, 1, 10)
   const anthropicVersion = Cfg.get('anthropicVersion', '2023-06-01')
 
   if (fallback) {
-    logger.warn(`[${pluginName}] 未填写 API 地址，按 ${provider} 协议回落到 ${base}`)
+    logger.warn(`[${pluginName}] 未填写 API 地址，按 ${provider} 协议回落到官方地址`)
   }
 
   // 注意：content 可能是分段数组（含图片），所以不能用 typeof === 'string' 过滤
@@ -378,7 +404,7 @@ async function chat(options = {}) {
   )
   if (cleanMessages.length === 0) {
     logger.warn(`[${pluginName}] 没有有效消息可发送`)
-    return null
+    return report({ type: 'request', status: 0, retryable: false, message: '没有可发送的消息。' })
   }
 
   const url = buildUrl(provider, base)
@@ -394,39 +420,47 @@ async function chat(options = {}) {
     imageDetail: provider === 'openai' ? normalizeImageDetail(Cfg.get('imageDetail', '')) : ''
   })
   let body = makeBody(effort)
-  const headers = buildHeaders(provider, apiKey, anthropicVersion)
-
   for (let attempt = 1; attempt <= attemptMax; attempt++) {
+    const startedAt = Date.now()
+    let status = 0
+    let retryWait = 0
     try {
+      // 可恢复错误的下一次尝试使用下一个密钥。
+      const headers = buildHeaders(provider, attempt === 1 ? apiKey : (pickApiKey(Cfg.get('apiKey', '')) || apiKey), anthropicVersion)
       const result = await postJson(url, headers, body, timeoutMs)
+      status = result.status
+      retryWait = result.retryAfterMs || 0
 
       if (!result.ok) {
-        // 有些服务商没有 max 档（实测 MiMo 最高就到 high）。选了 max 又被
-        // 400 / 422 拒绝时自动降档到 high 重试并记日志，不让整条回复链路失败。
-        if (effort === 'max' && (result.status === 400 || result.status === 422)) {
+        // 仅当服务商明确拒绝 reasoning_effort 时降档，不把图片等参数错误误判成思考档位问题。
+        if (shouldDowngradeReasoning(provider, effort, result)) {
           effort = 'high'
           body = makeBody(effort)
           logger.warn(`[${pluginName}] 服务商不接受思考强度 max（HTTP ${result.status}），已自动降档到 high 重试`)
           attempt-- // 降档那一次不消耗重试次数
           continue
         }
-        throw new Error(`${extractErrorMessage(result)}`)
+        throw new Error('HTTP 请求失败')
       }
 
       const content = provider === 'anthropic'
         ? extractAnthropicText(result.data)
         : extractOpenAIText(result.data)
 
-      if (!content) {
-        throw new Error('API 返回内容为空')
+      if (!content.trim()) {
+        const error = new Error('API 返回内容为空')
+        error.type = 'empty'
+        throw error
       }
+      logger.debug(`[${pluginName}] API 完成：协议=${provider} HTTP=${status} 耗时=${Date.now() - startedAt}ms 尝试=${attempt}`)
       return content
     } catch (error) {
-      const reason = error?.name === 'AbortError'
-        ? `请求超时（${timeoutMs}ms）`
-        : (error?.message || error)
-      logger.error(`[${pluginName}] API 调用失败（第 ${attempt}/${attemptMax} 次）：${reason}`)
-      if (attempt >= attemptMax) return null
+      const failure = classifyError(status, error)
+      logger.error(`[${pluginName}] API 调用失败（第 ${attempt}/${attemptMax} 次）：类别=${failure.type} HTTP=${status} 耗时=${Date.now() - startedAt}ms`)
+      if (!failure.retryable || attempt >= attemptMax) return report(failure)
+      // 服务端要求等待太久时结束本次请求，避免长时间占用会话队列。
+      if (retryWait > 10000) return report(failure)
+      await sleep(Math.max(retryWait, Math.min(500 * 2 ** (attempt - 1), 10000)))
     }
   }
 

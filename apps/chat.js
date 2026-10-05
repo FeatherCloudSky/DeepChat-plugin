@@ -5,6 +5,9 @@ import Provider from '../model/Provider.js'
 import Policy from '../model/Policy.js'
 import Permission from '../model/Permission.js'
 import Prompt from '../model/Prompt.js'
+import SessionQueue, { QueueFullError } from '../model/SessionQueue.js'
+import { cleanAnswer, trimDialog } from '../model/Context.js'
+import { isSendFailed } from '../model/message.js'
 import { getBuffer } from '../model/http.js'
 import { pluginName } from '../config/constant.js'
 import { splitReply, sleep, isBlank, isPublicHttpUrl, replyIdOf, findQuotedMessage } from '../model/utils.js'
@@ -65,6 +68,8 @@ async function segmentToImagePart(segment) {
   // 本地临时文件优先：最稳，不依赖服务商能不能访问 QQ 的图片地址
   if (localFile && fs.existsSync(localFile)) {
     try {
+      const stat = fs.statSync(localFile)
+      if (!stat.isFile() || stat.size > MAX_IMAGE_BYTES) return null
       const buffer = fs.readFileSync(localFile)
       if (buffer.length > 0 && buffer.length <= MAX_IMAGE_BYTES) {
         return { type: 'image', data: buffer.toString('base64'), mediaType: guessMime(localFile) }
@@ -82,7 +87,7 @@ async function segmentToImagePart(segment) {
         const downloaded = await downloadAsBase64(rawUrl)
         if (downloaded) return downloaded
       } else {
-        logger.warn(`[${pluginName}] 图片地址不是公网 http(s)，已跳过下载、仅透传 URL：${rawUrl}`)
+        logger.warn(`[${pluginName}] 图片地址不是公网 http(s)，已跳过下载、仅透传 URL`)
       }
     }
     return { type: 'image', url: rawUrl }
@@ -167,21 +172,18 @@ export default class DeepChat extends plugin {
 
   async chatCommand(e) {
     const content = String(e.msg ?? '').replace(/^#chat\s*/, '').trim()
-    if (!content && collectImageSegments(e).length === 0) {
+    if (!content && collectImageSegments(e).length === 0 && !replyIdOf(e)) {
       return e.reply('请在 #chat 后面跟上内容，例如：#chat 你好')
     }
     if (!Policy.resolveEnabled(e)) {
       return e.reply('本会话的 AI 对话已关闭。发送 #chat开 可以启用。')
-    }
-    if (Cfg.getBool('thinking', false)) {
-      replyWithRecall(e, e.reply('我正在思考如何回复你，请稍候', true), 30)
     }
     return this.processChat(e, content, 'active')
   }
 
   async endConversation(e) {
     try {
-      await redis.del(this.getCacheKey(e))
+      await SessionQueue.run(this.getCacheKey(e), () => redis.del(this.getCacheKey(e)), { control: true })
       return e.reply('已结束当前对话，相关上下文已被清除。')
     } catch (error) {
       logger.error(`[${pluginName}] 结束对话失败：${error.message || error}`)
@@ -192,8 +194,11 @@ export default class DeepChat extends plugin {
   async endAllConversations(e) {
     if (!Permission.isMaster(e)) return e.reply('只有主人才能结束全部对话。')
     try {
-      const keys = await redis.keys(`${this.redisKeyPrefix}*`)
-      if (keys.length > 0) await redis.del(keys)
+      const keys = await SessionQueue.exclusive(async () => {
+        const found = await redis.keys(`${this.redisKeyPrefix}*`)
+        if (found.length > 0) await redis.del(found)
+        return found
+      })
       return e.reply(`已结束全部对话，共清除 ${keys.length} 条上下文。`)
     } catch (error) {
       logger.error(`[${pluginName}] 结束全部对话失败：${error.message || error}`)
@@ -224,9 +229,6 @@ export default class DeepChat extends plugin {
 
     // 私聊
     if (!e.isGroup) {
-      if (Cfg.getBool('thinking', false)) {
-        replyWithRecall(e, e.reply('我正在思考如何回复你，请稍候', true), 30)
-      }
       return this.processChat(e, msg, 'active')
     }
 
@@ -241,9 +243,6 @@ export default class DeepChat extends plugin {
         content = e.message.filter((seg) => seg.type === 'text').map((seg) => seg.text).join('').trim()
       }
       if (!content && collectImageSegments(e).length === 0 && !hasReply) return false
-      if (Cfg.getBool('thinking', false)) {
-        replyWithRecall(e, e.reply('我正在思考如何回复你，请稍候', true), 30)
-      }
       // 被艾特 = 主动提问，不受伪人黑白名单限制
       return this.processChat(e, content, 'active')
     }
@@ -257,9 +256,6 @@ export default class DeepChat extends plugin {
         `[${pluginName}] 命中${trigger.kind}「${trigger.text}」，主动回复：` +
         `群(${e.group_id}) 用户(${e.user_id})`
       )
-      if (Cfg.getBool('thinking', false)) {
-        replyWithRecall(e, e.reply('我正在思考如何回复你，请稍候', true), 30)
-      }
       return this.processChat(e, msg, 'active')
     }
 
@@ -306,20 +302,43 @@ export default class DeepChat extends plugin {
 
   async processChat(e, content, interactionType = 'active') {
     try {
+      return await SessionQueue.run(this.getCacheKey(e), () => {
+        // 排队期间会话可能被关闭，开始处理时重新判断。
+        if (!Policy.resolveEnabled(e)) return false
+        return this.processChatNow(e, content, interactionType)
+      }, {
+        limit: Math.floor(Cfg.getNumber('sessionQueueLimit', 5, 1, 50)),
+        dropIfBusy: interactionType === 'pseudo'
+      })
+    } catch (error) {
+      if (error instanceof QueueFullError) {
+        return interactionType === 'active' ? e.reply('本会话正在处理较多消息，请稍后再试。') : false
+      }
+      throw error
+    }
+  }
+
+  async processChatNow(e, content, interactionType = 'active') {
+    try {
       const images = await this.buildImageParts(e)
       const text = String(content ?? '').trim()
       // 引用了消息，但那条里既没文字也没图片 —— 没什么可回的
-      if (!text && images.length === 0) {
+      if (!text && images.length === 0 && !images.hasImages) {
         logger.info(`[${pluginName}] 消息里既没有文字也没有可用的图片，跳过（${interactionType}）`)
         return false
       }
       const { messages, cacheKey } = await this.getContextWithHistory(e, content, interactionType, images)
+      if (interactionType === 'active' && Cfg.getBool('thinking', false)) {
+        replyWithRecall(e, e.reply('我正在思考如何回复你，请稍候', true), 30)
+      }
 
+      let failure = null
       const request = {
         messages,
         model: Cfg.get('model', '') || undefined,
         temperature: Cfg.get('temperature', 1),
-        maxTokens: Cfg.get('maxTokens', 512)
+        maxTokens: Cfg.get('maxTokens', 512),
+        onError: (error) => { failure = error }
       }
 
       if (interactionType === 'pseudo') {
@@ -327,15 +346,16 @@ export default class DeepChat extends plugin {
         request.maxTokens = Cfg.get('pseudoMaxTokens', 128)
       }
 
-      const answer = await Provider.chat(request)
+      const rawAnswer = await Provider.chat(request)
 
-      if (!answer) {
-        if (interactionType === 'active') return e.reply('AI 响应失败，请稍后再试或检查插件配置。')
+      if (!rawAnswer) {
+        if (interactionType === 'active') return e.reply(failure?.message || 'AI 响应失败，请稍后再试或检查插件配置。')
         logger.info(`[${pluginName}] 伪人模式响应为空，静默跳过`)
         return false
       }
 
-      await this.saveToCache(e, cacheKey, messages, answer)
+      const answer = cleanAnswer(rawAnswer)
+      if (!answer) return false
 
       const segments = Cfg.getBool('splitReply', true)
         ? splitReply(answer, {
@@ -347,13 +367,16 @@ export default class DeepChat extends plugin {
       const delayPerChar = Cfg.getNumber('replyDelayPerChar', 150, 0, 5000)
       const delayMax = Cfg.getNumber('replyDelayMaxMs', 2000, 0, 60000)
 
-      for (const segment of segments) {
+      for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i]
         if (!segment) continue
-        await e.reply(segment)
-        if (delayPerChar > 0 && delayMax > 0) {
+        if (isSendFailed(await e.reply(segment))) throw new Error('消息发送失败，请检查机器人连接状态。')
+        if (i < segments.length - 1 && delayPerChar > 0 && delayMax > 0) {
           await sleep(Math.min(segment.length * delayPerChar, delayMax))
         }
       }
+      // 只有发送成功的回答才进入上下文。
+      await this.saveToCache(e, cacheKey, messages, answer)
       return true
     } catch (error) {
       logger.error(`[${pluginName}] 聊天处理异常（${interactionType}）：${error.message || error}`)
@@ -385,7 +408,7 @@ export default class DeepChat extends plugin {
         `${fromQuote ? '（来自被引用的消息）' : ''}，但模型「${model || '(未配置)'}」没有开启图片输入，` +
         '已降级成 [图片] 文字。可在面板「模型能力 → 逐模型图片能力」里为它打开。'
       )
-      return []
+      return Object.assign([], { hasImages: true })
     }
 
     const parts = []
@@ -399,7 +422,7 @@ export default class DeepChat extends plugin {
       `识别到 ${segments.length} 张${fromQuote ? '（来自被引用的消息）' : ''}，成功转换 ${parts.length} 张` +
       `（${parts.map((p) => (p.data ? 'base64' : 'URL')).join('/') || '无'}）`
     )
-    return parts
+    return Object.assign(parts, { hasImages: true })
   }
 
   // ---------------------------------------------------------------- 上下文
@@ -421,27 +444,22 @@ export default class DeepChat extends plugin {
   /**
    * 写回上下文。
    * 特意把图片转成纯文本标记再缓存：base64 图片留在 Redis 里既占内存又没意义，
-   * 图片只需要在「当前这一轮」发给模型。historyCount 为 0 时干脆不缓存。
+   * 图片只需要在「当前这一轮」发给模型。系统提示每轮重建，不存入缓存。
    */
   async saveToCache(e, key, messages, answer) {
     const maxContextLength = Cfg.getNumber('maxContextLength', 25, 1, 200)
     const expireMinutes = Cfg.getNumber('cacheExpireMinutes', 60, 1, 10080)
     const imageMark = Cfg.get('imageHistoryMark', '[图片]')
 
-    const system = messages.filter((m) => m.role === 'system')
     const dialog = messages.filter((m) => m.role !== 'system')
-    const trimmed = dialog.slice(-maxContextLength)
-
-    const payload = [
-      ...system,
-      ...trimmed,
-      { role: 'assistant', content: answer }
-    ].map((message) => ({
+    const plain = [...dialog, { role: 'assistant', content: answer }].map((message) => ({
       role: message.role,
       content: Provider.partsToPlainText
         ? Provider.partsToPlainText(message.content, imageMark)
         : String(message.content ?? '')
     }))
+    const payload = trimDialog(plain, maxContextLength,
+      Cfg.getNumber('maxContextChars', 24000, 1000, 1000000), Provider.partsToPlainText)
 
     try {
       await redis.set(key, JSON.stringify(payload), { EX: expireMinutes * 60 })
@@ -463,6 +481,7 @@ export default class DeepChat extends plugin {
         : await e.friend.getChatHistory(0, fetchCount)
 
       return (raw || [])
+        .filter((msg) => !e.message_id || String(msg.message_id) !== String(e.message_id))
         .map((msg) => this.formatHistoryMessage(e, msg, imageMark))
         .filter(Boolean)
         .slice(-historyCount)
@@ -546,31 +565,35 @@ export default class DeepChat extends plugin {
 
   async getContextWithHistory(e, content, interactionType, images) {
     const cacheKey = this.getCacheKey(e)
-    let messages = await this.getCache(cacheKey)
-
-    if (!Array.isArray(messages) || messages.length === 0) {
-      messages = [this.buildSystemMessage(e, interactionType)]
-      const history = await this.getChatHistory(e)
-      messages = messages.concat(history)
-    }
+    const cached = await this.getCache(cacheKey)
+    let dialog = Array.isArray(cached) ? cached.filter((m) => m && ['user', 'assistant'].includes(m.role)) : []
+    if (dialog.length === 0) dialog = await this.getChatHistory(e)
+    const system = this.buildSystemMessage(e, interactionType)
 
     const decorated = decorateUserText(e, content)
     let userContent = decorated
 
     if (images.length > 0) {
       userContent = [{ type: 'text', text: decorated }, ...images]
-    } else if (collectImageSegments(e).length > 0) {
+    } else if (images.hasImages || collectImageSegments(e).length > 0) {
       // 模型不支持图片，但至少要让它知道有图
       userContent = `${decorated} ${Cfg.get('imageHistoryMark', '[图片]')}`.trim()
     }
 
     // 同一句话可能因为重试被重复追加，这里做一次精确去重
-    const last = messages[messages.length - 1]
+    const last = dialog[dialog.length - 1]
     if (last && last.role === 'user' && typeof last.content === 'string' && last.content === userContent) {
-      messages.pop()
+      dialog.pop()
     }
 
-    messages.push({ role: 'user', content: userContent })
+    const current = { role: 'user', content: userContent }
+    const budget = Cfg.getNumber('maxContextChars', 24000, 1000, 1000000) - system.content.length
+    if (Provider.partsToPlainText(userContent).length > budget) {
+      throw new Error('当前消息或人设过长，请缩短内容，或提高「上下文字符预算」。')
+    }
+    dialog = trimDialog([...dialog, current],
+      Cfg.getNumber('maxContextLength', 25, 1, 200), budget, Provider.partsToPlainText)
+    const messages = [system, ...dialog]
 
     return { messages, cacheKey }
   }
