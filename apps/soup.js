@@ -10,7 +10,6 @@
  * 能不能用由面板「海龟汤 → 允许普通成员使用」决定；查看永远不受限制
  * （汤面本来就是放给大家看的，锁上就没法玩了）。
  */
-import fs from 'node:fs'
 import path from 'node:path'
 import Soup from '../model/Soup.js'
 import Cfg from '../model/Cfg.js'
@@ -19,34 +18,22 @@ import { getBuffer } from '../model/http.js'
 import { replyImage } from '../model/message.js'
 import { readImageSize, isOverLimit, shrinkImage } from '../model/image.js'
 import { pluginName } from '../config/constant.js'
-import { findQuotedMessage, isFetchableUrl } from '../model/utils.js'
+import { findQuotedMessage } from '../model/utils.js'
+import { readTrustedImage } from '../model/safepath.js'
+import { sniffImageType } from '../model/sniff.js'
+import { downloadConcurrency, withSlot } from '../model/concurrency.js'
+import { redactUrl } from '../model/net.js'
 
 /**
  * 源图硬上限：超过这个数就不拉了，免得内存被顶爆。
  * 拉回来之后按面板配置的上限（默认 20MB / 10000px）缩，缩不动才放弃。
  */
-const SOURCE_HARD_CAP = 64 * 1024 * 1024
+const SOURCE_HARD_CAP = 32 * 1024 * 1024
 
 /** 引用消息可能落在多远的记录里：先试 30 条，不够再翻 120 条 */
 const QUOTE_WINDOWS = [30, 120]
 
-const EXT_BY_MIME = {
-  'image/png': '.png',
-  'image/jpeg': '.jpg',
-  'image/jpg': '.jpg',
-  'image/gif': '.gif',
-  'image/webp': '.webp',
-  'image/bmp': '.bmp'
-}
-
 const isHttpUrl = (value) => /^https?:\/\//i.test(String(value ?? ''))
-
-function guessExt(nameOrUrl, contentType) {
-  const mime = String(contentType || '').split(';')[0].trim().toLowerCase()
-  if (EXT_BY_MIME[mime]) return EXT_BY_MIME[mime]
-  const ext = path.extname(String(nameOrUrl ?? '').split('?')[0]).toLowerCase()
-  return /^\.(png|jpg|jpeg|gif|webp|bmp)$/.test(ext) ? (ext === '.jpeg' ? '.jpg' : ext) : '.jpg'
-}
 
 const fmtTime = (t) => new Date(t).toLocaleString('zh-CN', { hour12: false })
 
@@ -60,48 +47,44 @@ function leftText(ms) {
 }
 
 /** 按文件头认图片类型 —— 适配器给的临时文件常叫 xxx.image，看扩展名会猜错 */
-function sniffImage(buffer) {
-  if (!Buffer.isBuffer(buffer)) return ''
-  const head = buffer.subarray(0, 12)
-  if (head.length >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return '.png'
-  if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return '.jpg'
-  if (head.length >= 6 && head.subarray(0, 6).toString('latin1').startsWith('GIF8')) return '.gif'
-  if (head.length >= 12 && head.subarray(0, 4).toString('latin1') === 'RIFF' &&
-      head.subarray(8, 12).toString('latin1') === 'WEBP') return '.webp'
-  if (head.length >= 2 && head[0] === 0x42 && head[1] === 0x4d) return '.bmp'
-  return ''
+const sniffImage = sniffImageType
+
+/** 允许访问的「本机/内网」地址白名单（适配器自建 HTTP 端口这类） */
+function privateHostAllowList() {
+  return Cfg.getIdList('privateHostAllowList')
 }
 
-/** 读本机图片：适配器给的可能是绝对路径、相对路径，或者只有一个文件名 */
+/**
+ * 读本机图片：适配器给的可能是绝对路径、相对路径，或者只有一个文件名。
+ * 只认受信任目录里的文件，而且内容必须真的是图片。
+ */
 function readLocalImage(raw) {
   const candidates = [raw]
   if (!path.isAbsolute(raw)) {
     candidates.push(path.resolve(process.cwd(), raw))
     candidates.push(path.resolve(process.cwd(), 'data', raw))
   }
-  for (const candidate of candidates) {
-    try {
-      if (!fs.existsSync(candidate)) continue
-      const stat = fs.statSync(candidate)
-      if (!stat.isFile() || stat.size === 0 || stat.size > SOURCE_HARD_CAP) continue
-      return fs.readFileSync(candidate)
-    } catch (error) {
-      // 换下一个候选路径继续试
-    }
+  try {
+    return readTrustedImage(candidates, {
+      maxBytes: SOURCE_HARD_CAP,
+      extraRoots: Cfg.getIdList('localFileRoots')
+    })
+  } catch (error) {
+    logger.warn(`[${pluginName}] 汤面图片的本地文件不可用：${error.message || error}`)
+    return null
   }
-  return null
 }
 
 /**
  * 把被引用消息里的一个图片段变成字节。
  *
  * 两条路：
- *   1. 适配器已经把图落成临时文件 —— 直接读，最稳；
+ *   1. 适配器已经把图落成临时文件 —— 直接读（限受信任目录）；
  *   2. 只有 http(s) 地址 —— 服务端去拉。
  *
- * 第 2 条是服务端发起的请求，地址来自群消息，所以要过一遍
- * isFetchableUrl：本机 / 内网放行（适配器常这么供图），
- * 云元数据那类地址挡掉。
+ * 第 2 条是服务端发起的请求，地址来自群消息：
+ * 只允许公网地址，域名先解析、再核对接回来的每个 IP、连接钉在审核过的地址上。
+ * 适配器本机端口这类需求，用面板里的白名单显式放行，不要放宽这里的规则。
  */
 async function segmentImage(segment) {
   // 兼容两种段结构：Yunzai 的 { file, url } 与 OneBot v11 的 { data: { file, url } }
@@ -112,12 +95,12 @@ async function segmentImage(segment) {
   const localRaw = fileField && !isHttpUrl(fileField) ? fileField : ''
 
   if (localRaw) {
-    const buffer = readLocalImage(localRaw)
-    if (buffer) {
+    const local = readLocalImage(localRaw)
+    if (local) {
       return {
         ok: true,
-        data: buffer,
-        ext: sniffImage(buffer) || guessExt(localRaw),
+        data: local.buffer,
+        ext: local.ext,
         url,
         mediaType: '',
         from: '本机文件'
@@ -131,28 +114,34 @@ async function segmentImage(segment) {
     return { ok: false, reason: '这条消息里的图片既没有本机文件也没有下载地址' }
   }
 
-  if (!isFetchableUrl(url)) {
-    logger.warn(`[${pluginName}] 汤面图片地址被安全规则挡下，已跳过：${url}`)
-    return { ok: false, reason: '图片地址指向的是云元数据之类的特殊地址，出于安全没有去拉' }
-  }
-
   try {
-    const result = await getBuffer(url, 15000, SOURCE_HARD_CAP)
+    const result = await withSlot('download', downloadConcurrency(),
+      () => getBuffer(url, 15000, SOURCE_HARD_CAP, {
+        allowPrivate: false,
+        allowLoopback: false,
+        allowHosts: privateHostAllowList()
+      }))
     if (!result.ok || !result.buffer?.length) {
-      logger.warn(`[${pluginName}] 下载汤面图片失败，HTTP ${result.status ?? '?'}：${url}`)
+      logger.warn(`[${pluginName}] 下载汤面图片失败，HTTP ${result.status ?? '?'}：${redactUrl(url)}`)
       return { ok: false, reason: `图片下载失败（HTTP ${result.status ?? '?'}）` }
+    }
+    // 非图片内容不保存、不进入回复流程：只给提示等于没隔离
+    const ext = sniffImage(result.buffer)
+    if (!ext) {
+      logger.warn(`[${pluginName}] 汤面图片地址返回的不是图片，已拒绝：${redactUrl(url)}`)
+      return { ok: false, reason: '这个地址返回的内容不是图片，已拒绝保存' }
     }
     return {
       ok: true,
       data: result.buffer,
-      ext: sniffImage(result.buffer) || guessExt(url, result.contentType),
+      ext,
       url,
       mediaType: String(result.contentType || '').split(';')[0].trim(),
       from: '下载'
     }
   } catch (error) {
     logger.warn(`[${pluginName}] 下载汤面图片失败：${error.message || error}`)
-    return { ok: false, reason: '图片下载失败' }
+    return { ok: false, reason: error?.name === 'BlockedTargetError' ? '这个图片地址指向非公网范围，已拒绝' : '图片下载失败' }
   }
 }
 
@@ -163,7 +152,7 @@ async function sendImage(e, buffer, image) {
   logger.warn(`[${pluginName}] 汤面图发送失败：${sent.error || '未知原因'}`)
   await e.reply(
     image?.url
-      ? `（这张图发不出去：${sent.error || '被协议端拒绝'}。原地址：${image.url}）`
+      ? `（这张图发不出去：${sent.error || '被协议端拒绝'}。原地址含临时签名，已隐藏）`
       : `（这张图发不出去：${sent.error || '被协议端拒绝'}。如果别的插件发图也失败，多半是账号被限制发图了）`
   )
   return false
@@ -179,6 +168,11 @@ function maxImageSide() {
   return Cfg.getNumber('soupMaxImageSide', 10000, 100, 50000)
 }
 
+/** 单张图的总像素上限：解码炸弹的常见形态是「字节很小、尺寸极大」 */
+function maxImagePixels() {
+  return Cfg.getNumber('soupMaxPixels', 40, 1, 400) * 1000000
+}
+
 /**
  * 按面板配置卡一下图：超了就自动缩小，缩不动才放回一个「为什么」。
  * @returns {Promise<{ok: boolean, image?: object, shrunk?: boolean, reason?: string}>}
@@ -186,7 +180,17 @@ function maxImageSide() {
 async function applyImageLimits(e, image) {
   const maxBytes = maxImageBytes()
   const maxSide = maxImageSide()
+  const maxPixels = maxImagePixels()
   const size = readImageSize(image.data)
+
+  // 总像素超预算的图**不交给渲染器**：缩图本身就要先解码，
+  // 把一个 50000×50000 的图丢进去，等于让「限制」自己变成攻击面。
+  if (size?.width && size?.height && size.width * size.height > maxPixels) {
+    return {
+      ok: false,
+      reason: `图片像素超过上限（${size.width}×${size.height}，上限 ${Math.round(maxPixels / 1000000)} 百万像素）`
+    }
+  }
 
   if (!isOverLimit(size, image.data.length, { maxSide, maxBytes })) {
     return { ok: true, image, shrunk: false }
@@ -291,17 +295,16 @@ export class soup extends plugin {
   /**
    * 每条消息都先过这里。返回 false = 「我不认领这条消息」，消息继续往下走。
    *
-   * 这里只做一件事：消息里提到「汤面」就把 e.msg 原样记进日志。
-   * 以后要是再出现「发了 #汤面 没反应」，看日志就能分清是
-   * 「消息根本没送到插件」（群设成了仅 @ 时响应）还是
-   * 「送到了，但内容跟预期不一样」。
+   * 这里只做一件事：消息里提到「汤面」就记一条日志（**不记正文**）。
+   * 记正文会把群友的聊天内容抄进日志文件，而日志的保留期和访问权限
+   * 都不受这个插件控制 —— 为了排障不值得。
    */
   async accept(e) {
     try {
       const msg = String(e?.msg ?? '')
       if (msg.includes('汤面')) {
         logger.info(
-          `[${pluginName}] 收到含「汤面」的消息：${JSON.stringify(msg)}` +
+          `[${pluginName}] 收到含「汤面」的消息（${msg.length} 字，内容不记录）` +
           `（会话 ${e?.isGroup ? `群 ${e.group_id}` : `私聊 ${e?.user_id}`}）`
         )
       }
@@ -311,9 +314,9 @@ export class soup extends plugin {
     return false
   }
 
-  /** 记录 / 删除的资格：主人管理员恒可用，普通成员看开关（默认开） */
+  /** 记录 / 删除的资格：主人管理员恒可用，普通成员默认不可用（面板可放开） */
   canManage(e) {
-    return Permission.isAdmin(e) || Cfg.getBool('soupAllowMember', true)
+    return Permission.isAdmin(e) || Cfg.getBool('soupAllowMember', false)
   }
 
   denied(e) {
@@ -433,7 +436,7 @@ export class soup extends plugin {
     for (const image of meta.images) {
       const buffer = Soup.imageBuffer(meta, image)
       if (!buffer) {
-        if (image.url) await e.reply(`（有一张图在本地找不到了，原地址：${image.url}）`)
+        if (image.url) await e.reply('（有一张图在本地找不到了；原地址含临时签名，已隐藏）')
         continue
       }
       // 先把「这字节不像图片」说出来：万一图发不出去，至少还有个线索

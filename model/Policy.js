@@ -103,24 +103,29 @@ export function matchAiKeyword(text, keywords = keywordList()) {
 /**
  * 会话级启用判定。优先级从高到低：
  *   1. 私聊总开关 enablePrivate（只对私聊生效，关掉就一律不响应）
- *   2. 会话级单独设置（#chat开 / #chat关 写进 state.json）
- *   3. 禁用列表 disabledGroups / disabledUsers
+ *   2. 禁用列表 disabledGroups / disabledUsers —— **最高优先级，会话开关也不能覆盖**
+ *   3. 会话级单独设置（#chat开 / #chat关 写进 state.json）
  *   4. 启用列表 enabledGroups / enabledUsers
  *   5. 全局默认值 enableByDefault
+ *
+ * 第 2 步原来排在第 3 步后面，于是面板上的「强制停用」在会话里点一下 #chat开
+ * 就失效了 —— 名字带着「强制」，行为却不是强制的，这比没有这个列表更危险。
  */
 function resolveEnabled(e) {
   if (!e) return false
 
   if (!e.isGroup && !Cfg.getBool('enablePrivate', true)) return false
 
-  const override = ChatState.getOverride(e)
-  if (override !== null) return override
-
   const id = e.isGroup ? e.group_id : e.user_id
   const disabled = Cfg.getIdList(e.isGroup ? 'disabledGroups' : 'disabledUsers')
   const enabled = Cfg.getIdList(e.isGroup ? 'enabledGroups' : 'enabledUsers')
 
+  // 先判拒绝：这是一份运维用来「立刻掐断」的名单，不该被任何会话级设置盖掉
   if (idIn(disabled, id)) return false
+
+  const override = ChatState.getOverride(e)
+  if (override !== null) return override
+
   if (idIn(enabled, id)) return true
 
   return Cfg.getBool('enableByDefault', true)
@@ -153,15 +158,17 @@ function shouldPseudoTrigger(e) {
 /** 生成一句人类可读的启用状态描述，供 #chat状态 使用 */
 function describe(e) {
   const override = ChatState.getOverride(e)
-  const enabled = resolveEnabled(e)
-  const source = override !== null
-    ? '会话单独设置'
-    : (idIn(Cfg.getIdList(e.isGroup ? 'disabledGroups' : 'disabledUsers'), e.isGroup ? e.group_id : e.user_id)
-        ? '禁用列表'
-        : (idIn(Cfg.getIdList(e.isGroup ? 'enabledGroups' : 'enabledUsers'), e.isGroup ? e.group_id : e.user_id)
-            ? '启用列表'
-            : '全局默认值'))
-  return { enabled, source, override }
+  const disabled = idIn(Cfg.getIdList(e.isGroup ? 'disabledGroups' : 'disabledUsers'),
+    e.isGroup ? e.group_id : e.user_id)
+  const enabledList = idIn(Cfg.getIdList(e.isGroup ? 'enabledGroups' : 'enabledUsers'),
+    e.isGroup ? e.group_id : e.user_id)
+  const resolved = resolveEnabled(e)
+  const source = disabled
+    ? '禁用列表（优先于会话开关）'
+    : (override !== null
+        ? '会话单独设置'
+        : (enabledList ? '启用列表' : '全局默认值'))
+  return { enabled: resolved, source, override }
 }
 
 export { resolveEnabled, shouldPseudoTrigger, describe, canUseRecord }

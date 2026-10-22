@@ -29,7 +29,13 @@ const SWEEP_INTERVAL_MS = 30 * 60 * 1000
 
 const ensureDir = () => fs.mkdirSync(DIR, { recursive: true })
 
-const sessionKey = (e) => (e?.isGroup ? `group_${e.group_id}` : `private_${e.user_id}`)
+function botOf(e) {
+  const id = String(e?.self_id ?? e?.selfId ?? '').trim()
+  return id || 'default'
+}
+
+/** 键里带机器人身份：多机器人共用进程时，同一个群各有一份汤面 */
+const sessionKey = (e) => `b${botOf(e)}_${e?.isGroup ? `group_${e.group_id}` : `private_${e.user_id}`}`
 
 const sessionLabel = (e) => {
   if (!e?.isGroup) return '私聊'
@@ -37,7 +43,21 @@ const sessionLabel = (e) => {
 }
 
 const metaFile = (key) => path.join(DIR, `${key}.json`)
-const imageFile = (name) => path.join(DIR, name)
+
+/**
+ * 图片文件名只允许「我们自己生成的形状」：字母数字下划线 + 已知扩展名。
+ * 元信息文件是可以被手工改的，filename 里塞 `..\..\cfg.json` 就能让删汤面
+ * 顺手删掉别的文件 —— 这里直接把不合规的名字判死。
+ */
+const SAFE_IMAGE_NAME = /^[A-Za-z0-9_-]+\.(png|jpg|jpeg|gif|webp|bmp|avif)$/i
+
+function imageFile(name) {
+  const base = path.basename(String(name ?? ''))
+  if (!SAFE_IMAGE_NAME.test(base)) return null
+  const full = path.join(DIR, base)
+  if (path.dirname(full) !== DIR) return null
+  return full
+}
 
 /** 保存时长（小时）——每次现读配置，面板改了立刻生效 */
 const expireHours = () => Cfg.getNumber('soupExpireHours', 24, 1, 24 * 30)
@@ -57,14 +77,16 @@ function readMeta(key) {
 
 function writeMeta(meta) {
   ensureDir()
-  fs.writeFileSync(metaFile(meta.key), JSON.stringify(meta, null, 2), 'utf8')
+  fs.writeFileSync(metaFile(meta.key), JSON.stringify(meta, null, 2), { encoding: 'utf8', mode: 0o600 })
 }
 
 /** 删掉这条汤面带的图片文件 */
 function dropImages(meta) {
   for (const image of meta?.images || []) {
     if (!image?.name) continue
-    try { fs.unlinkSync(imageFile(image.name)) } catch (error) { /* 文件可能已经不在了 */ }
+    const file = imageFile(image.name)
+    if (!file) continue
+    try { fs.unlinkSync(file) } catch (error) { /* 文件可能已经不在了 */ }
   }
 }
 
@@ -102,7 +124,9 @@ function restoreAndClean() {
       if (file.endsWith('.json')) continue
       const key = file.replace(/_\d+\.[A-Za-z0-9]+$/, '')
       if (active.has(key)) continue
-      try { fs.unlinkSync(imageFile(file)); removed++ } catch (error) { /* 忽略 */ }
+      const target = imageFile(file)
+      if (!target) continue
+      try { fs.unlinkSync(target); removed++ } catch (error) { /* 忽略 */ }
     }
 
     if (restored > 0) logger.mark(`[${pluginName}] 恢复了 ${restored} 条汤面`)
@@ -138,9 +162,11 @@ const Soup = {
   /** 当前会话记着的汤面；没有或已过期返回 null */
   get(e) {
     const key = sessionKey(e)
-    const meta = active.get(key) || readMeta(key)
+    // 旧版本的键不带机器人身份，升级后先回退读一次，不让已有汤面凭空消失
+    const legacy = e?.isGroup ? `group_${e.group_id}` : `private_${e.user_id}`
+    const meta = active.get(key) || readMeta(key) || active.get(legacy) || readMeta(legacy)
     if (!meta) { active.delete(key); return null }
-    if (isExpired(meta)) { purge(key); return null }
+    if (isExpired(meta)) { purge(meta.key || key); return null }
     active.set(key, meta)
     return meta
   },
@@ -179,7 +205,7 @@ const Soup = {
       if (!image?.data?.length) return
       const name = `${key}_${i + 1}${image.ext || '.jpg'}`
       try {
-        fs.writeFileSync(imageFile(name), image.data)
+        fs.writeFileSync(imageFile(name), image.data, { mode: 0o600 })
         meta.images.push({
           name,
           url: String(image.url || ''),
@@ -199,17 +225,21 @@ const Soup = {
   /** 删除整条汤面；没有则返回 null */
   remove(e) {
     const key = sessionKey(e)
-    const meta = active.get(key) || readMeta(key)
+    const legacy = e?.isGroup ? `group_${e.group_id}` : `private_${e.user_id}`
+    const meta = active.get(key) || readMeta(key) || active.get(legacy) || readMeta(legacy)
     if (!meta) { active.delete(key); return null }
-    purge(key)
+    purge(meta.key || key)
+    active.delete(key)
     return meta
   },
 
   /** 取出某张图的字节；文件不在了返回 null */
   imageBuffer(meta, image) {
     if (!image?.name) return null
+    const file = imageFile(image.name)
+    if (!file) return null
     try {
-      const buffer = fs.readFileSync(imageFile(image.name))
+      const buffer = fs.readFileSync(file)
       return buffer.length > 0 ? buffer : null
     } catch (error) {
       return null

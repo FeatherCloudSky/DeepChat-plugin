@@ -76,9 +76,60 @@ export function supportGuoba() {
         {
           field: 'timeoutMs',
           label: '请求超时（毫秒）',
-          bottomHelpMessage: '超过这个时间未返回就中断本次请求',
+          bottomHelpMessage: '超过这个时间未返回就中断本次请求（整条请求的截止时间，不只是空闲超时）',
           component: 'InputNumber',
           componentProps: { min: 1000, max: 600000, step: 1000, placeholder: '60000' }
+        },
+        {
+          field: 'allowInsecureApi',
+          label: '允许明文 HTTP 的远程 API',
+          bottomHelpMessage: '默认必须 HTTPS。打开后远程 API 可以用 http，但 Key 和整段对话都会明文传输；本机网关（http://127.0.0.1）始终允许',
+          component: 'Switch'
+        },
+        {
+          field: 'maxResponseMB',
+          label: '响应体体积上限（MB）',
+          bottomHelpMessage: '接口返回超过这个体积就中断，避免超大响应把内存打满（1 ~ 128）',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 128, step: 1, placeholder: '8' }
+        },
+        {
+          field: 'apiMaxConcurrent',
+          label: '全局并发请求上限',
+          bottomHelpMessage: '全进程同时在飞的模型请求数（1 ~ 64）。超出的排一会队，排太久会直接提示忙，不会无限挂起',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 64, step: 1, placeholder: '6' }
+        },
+        {
+          field: 'userRatePerMinute',
+          label: '单会话每分钟请求上限',
+          bottomHelpMessage: '同一个群 / 同一个人一分钟内最多发起几次模型请求，0 表示不限',
+          component: 'InputNumber',
+          componentProps: { min: 0, max: 600, step: 1, placeholder: '30' }
+        },
+
+        // ---------------------------------------------------------- 网络与文件安全
+        { label: '安全与出站', component: 'SOFT_GROUP_BEGIN' },
+        {
+          field: 'downloadMaxConcurrent',
+          label: '下载并发上限',
+          bottomHelpMessage: '同时进行的图片 / 文件下载数（1 ~ 64），防止大量图片把连接数和内存打满',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 64, step: 1, placeholder: '4' }
+        },
+        {
+          field: 'privateHostAllowList',
+          label: '允许访问的本机 / 内网地址',
+          bottomHelpMessage: '群消息里的图片、文件地址默认只允许公网，且会解析 DNS 后核对每个 IP。适配器自建 HTTP 端口供图时（NapCat / Lagrange 等常见），把 host:port 填进来，逗号分隔，例如 127.0.0.1:3000',
+          component: 'Input',
+          componentProps: { placeholder: '127.0.0.1:3000' }
+        },
+        {
+          field: 'localFileRoots',
+          label: '本机文件白名单目录',
+          bottomHelpMessage: '适配器给的本地图片 / 文件只允许读插件 data、系统临时目录、机器人 data 目录。放在别处时把目录填进来，逗号分隔。目录外的路径、以及伪装成图片的文本一律拒绝',
+          component: 'Input',
+          componentProps: { placeholder: '/opt/bot/data/images' }
         },
 
         // ---------------------------------------------------------- 模型能力
@@ -333,11 +384,19 @@ export function supportGuoba() {
         // ---------------------------------------------------------- 上下文与缓存
         { label: '上下文与缓存', component: 'SOFT_GROUP_BEGIN' },
         {
+          field: 'includeHistory',
+          label: '首次对话附加聊天记录',
+          bottomHelpMessage: '关闭后不会把群里的历史发言带进请求（上下文缓存不受影响）。' +
+            '在意群友隐私、或群里本来就有敏感内容时关掉它',
+          component: 'Switch'
+        },
+        {
           field: 'historyCount',
           label: '附加聊天记录条数',
-          bottomHelpMessage: '首次对话时，额外带上最近多少条群聊/私聊记录作为语感参考（0 ~ 50）',
+          bottomHelpMessage: '首次对话时，额外带上最近多少条群聊/私聊记录作为语感参考（0 ~ 50）。' +
+            '这些是**别人**的发言，会被发送给模型服务商',
           component: 'InputNumber',
-          componentProps: { min: 0, max: 50, step: 1, placeholder: '7' }
+          componentProps: { min: 0, max: 50, step: 1, placeholder: '5' }
         },
         {
           field: 'maxContextLength',
@@ -385,7 +444,7 @@ export function supportGuoba() {
         {
           field: 'disabledGroups',
           label: '强制停用的群',
-          bottomHelpMessage: '这些群一定停用，优先级最高',
+          bottomHelpMessage: '这些群一定停用，而且优先于会话里的 #chat开（会话开关不能覆盖它）',
           component: 'GSelectGroup'
         },
         {
@@ -402,7 +461,7 @@ export function supportGuoba() {
         {
           field: 'disabledUsers',
           label: '强制停用的私聊用户',
-          bottomHelpMessage: '这些 QQ 号私聊时一定停用，优先级最高',
+          bottomHelpMessage: '这些 QQ 号私聊时一定停用，而且优先于会话里的 #chat开',
           component: 'GTags',
           componentProps: {
             allowAdd: true,
@@ -462,6 +521,13 @@ export function supportGuoba() {
           componentProps: { min: 10, max: 100000, step: 10, placeholder: '2000' }
         },
         {
+          field: 'recordMaxMB',
+          label: '单次记录体积上限（MB）',
+          bottomHelpMessage: '一个会话的记录文件超过这个体积就不再写入（1 ~ 128）',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 128, step: 1, placeholder: '8' }
+        },
+        {
           field: 'recordIncludeBot',
           label: '记录机器人自己的发言',
           bottomHelpMessage: '默认不记。开启后 AI 的回复也会进记录',
@@ -469,8 +535,8 @@ export function supportGuoba() {
         },
         {
           field: 'recordExpireHours',
-          label: '未结束的记录保留时长（小时）',
-          bottomHelpMessage: '开了记录却一直没发 #结束记录 的，超过这个时间会被自动清理',
+          label: '记录的保留时长（小时）',
+          bottomHelpMessage: '按「开始记录的时间」算，运行中到期会停止记录并删除文件，不是等重启才算',
           component: 'InputNumber',
           componentProps: { min: 1, max: 720, step: 1, placeholder: '24' }
         },
@@ -536,6 +602,14 @@ export function supportGuoba() {
           componentProps: { min: 1, max: 256 }
         },
         {
+          field: 'soupMaxPixels',
+          label: '汤面单张图片总像素上限（百万）',
+          bottomHelpMessage: '默认 40（即 4000 万像素）。「文件很小、尺寸极大」的解码炸弹会在缩图之前就被拒绝，' +
+            '不会交给渲染器去解码',
+          component: 'InputNumber',
+          componentProps: { min: 1, max: 400 }
+        },
+        {
           field: 'soupRefreshOnView',
           label: '查看时重新计时',
           bottomHelpMessage: '关闭（默认）：从记录那一刻起算，满「保存时长」就过期。' +
@@ -545,8 +619,9 @@ export function supportGuoba() {
         {
           field: 'soupAllowMember',
           label: '允许普通成员使用',
-          bottomHelpMessage: '默认开。汤面属于会话，不是发汤面那个人的私产——谁引用它都能记、都能删。' +
-            '关掉后只有主人 / 管理员能记录和删除，查看不受影响',
+          bottomHelpMessage: '默认关。汤面属于会话，不是发汤面那个人的私产——谁引用它都能记、都能删。' +
+            '关掉后只有主人 / 管理员能记录和删除，查看不受影响。' +
+            '注意：记录会把被引用消息里的图片下载到服务器，所以普通成员版默认关闭',
           component: 'Switch'
         },
 
@@ -592,7 +667,8 @@ export function supportGuoba() {
         {
           field: 'enablePseudoHuman',
           label: '启用伪人模式',
-          bottomHelpMessage: '开启后 AI 会按概率主动接群友的话，而不是只被动回答',
+          bottomHelpMessage: '默认关。打开后 AI 会按概率主动接群友的话，而不是只被动回答 —— ' +
+            '这意味着**没跟 AI 说话的人**的发言也会被发给模型服务商，请先确认群友知情',
           component: 'Switch'
         },
         {
@@ -728,7 +804,14 @@ export function supportGuoba() {
         }
         const plain = { ...data }
         delete plain.promptIndex        // 这栏只往文件里写，不进配置
-        if (!Cfg.setMany(plain)) return Result.error('配置保存失败，请检查数据目录权限或磁盘空间')
+
+        // 先把「哪些字段不合法」说清楚，再谈落盘。
+        // 只说「保存失败，检查权限」会让面板字段漂移这种问题极难排查。
+        const checked = Cfg.validatePairs(plain)
+        if (!checked.ok) {
+          return Result.error(`以下配置项无法保存：${checked.rejected.slice(0, 5).join('；')}`)
+        }
+        if (!Cfg.setMany(checked.clean)) return Result.error('配置保存失败，请检查数据目录权限或磁盘空间')
         return Result.ok({}, '保存成功')
       }
     }

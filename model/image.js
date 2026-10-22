@@ -149,7 +149,8 @@ export async function shrinkImage(e, buffer, size, limits) {
 
   try {
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(file, buffer)
+    // 临时文件里是群友发来的图，别让同机的其他用户顺手读走
+    fs.writeFileSync(file, buffer, { mode: 0o600 })
   } catch (error) {
     logger.warn(`[${pluginName}] 写临时图失败，无法缩小：${error.message || error}`)
     return null

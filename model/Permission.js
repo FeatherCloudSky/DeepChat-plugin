@@ -53,13 +53,26 @@ function userIdOf(e) {
   return String(e?.user_id ?? e?.userId ?? '')
 }
 
+/**
+ * 宿主给的主人标记。
+ *
+ * 必须读**自有属性**：如果哪天 e 的原型被污染出 `isMaster: true`
+ * （配置接口的原型污染就是这种形态），`Boolean(e.isMaster)` 会把
+ * 每一条消息都判成主人。这里宁可漏认，也不认继承来的权限。
+ */
+function hostMasterFlag(e) {
+  if (!e || typeof e !== 'object') return false
+  if (!Object.prototype.hasOwnProperty.call(e, 'isMaster')) return false
+  return e.isMaster === true
+}
+
 export function isMaster(e) {
   if (!e) return false
   const id = userIdOf(e)
-  if (!id) return Boolean(e.isMaster)
   const master = masterId()
-  if (master && id === master) return true
-  return Boolean(e.isMaster)
+  if (id && master && id === master) return true
+  if (hostMasterFlag(e)) return true
+  return false
 }
 
 export function isAdmin(e) {

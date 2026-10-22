@@ -2,17 +2,31 @@
  * 通用小工具。刻意不依赖 lodash / openai，
  * 让插件做到「零安装依赖」—— 克隆下来就能用。
  */
+import net from 'node:net'
+import { classifyAddress } from './net.js'
 
 /** 判断空值（undefined / null / 空字符串 / 纯空白） */
 export function isBlank(value) {
   return value === undefined || value === null || String(value).trim() === ''
 }
 
-/** 递归合并普通对象，返回 target 本身 */
+/**
+ * 这些键一旦被当成「普通字段」写进对象，就会改到整条原型链上 ——
+ * 配置里出现一个 `__proto__.isMaster` 就能让同进程里所有对象都继承它。
+ * 所有「按键写入」的地方都要先过这一关。
+ */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+export function isSafeKey(key) {
+  return typeof key === 'string' && key !== '' && !UNSAFE_KEYS.has(key)
+}
+
+/** 递归合并普通对象，返回 target 本身。危险键直接丢弃，不参与合并。 */
 export function deepMerge(target, ...sources) {
   for (const source of sources) {
     if (!source || typeof source !== 'object') continue
     for (const [key, value] of Object.entries(source)) {
+      if (!isSafeKey(key)) continue
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         const base = target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])
           ? target[key]
@@ -38,13 +52,23 @@ export function getByPath(obj, path, def) {
   return cur === undefined ? def : cur
 }
 
-/** 按 "a.b.c" 赋值 */
+/**
+ * 按 "a.b.c" 赋值。
+ * 路径里出现 __proto__ / constructor / prototype 时直接拒绝并抛错 ——
+ * 这类键不是「配置项」，写进去只会污染原型。
+ */
 export function setByPath(obj, path, value) {
   const parts = String(path).split('.')
+  for (const part of parts) {
+    if (!isSafeKey(part)) throw new Error(`不安全的配置键：${path}`)
+  }
   let cur = obj
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i]
-    if (!cur[part] || typeof cur[part] !== 'object') cur[part] = {}
+    if (!Object.prototype.hasOwnProperty.call(cur, part) ||
+        !cur[part] || typeof cur[part] !== 'object' || Array.isArray(cur[part])) {
+      cur[part] = {}
+    }
     cur = cur[part]
   }
   cur[parts[parts.length - 1]] = value
@@ -74,18 +98,38 @@ export function idIn(list, id) {
   return parseIdList(list).includes(target)
 }
 
-/**
- * 从 apiKey 字段里随机取一个 key。
- * 支持英文逗号、中文逗号、分号、换行分隔的多个 key。
- */
-export function pickApiKey(raw) {
+/** 把 apiKey 字段拆成去重后的 key 列表 */
+export function apiKeyList(raw) {
   const keys = String(raw ?? '')
     .replace(/[，；;]/g, ',')
     .split(/[,\n]/)
     .map((item) => item.trim())
     .filter(Boolean)
+  return [...new Set(keys)]
+}
+
+/**
+ * 从 apiKey 字段里随机取一个 key。
+ * 支持英文逗号、中文逗号、分号、换行分隔的多个 key。
+ */
+export function pickApiKey(raw) {
+  const keys = apiKeyList(raw)
   if (keys.length === 0) return ''
   return keys[Math.floor(Math.random() * keys.length)]
+}
+
+/**
+ * 重试时换一个 key。
+ *
+ * 原来每次重试都是「在全部 key 里再随机取一个」，于是取回同一个 key 是常态 ——
+ * 换 Key 重试并没有真的发生。这里排除掉上一次用过的那个。
+ */
+export function pickApiKeyExcept(raw, avoid) {
+  const keys = apiKeyList(raw)
+  if (keys.length === 0) return ''
+  const pool = keys.filter((key) => key !== avoid)
+  const pick = pool.length > 0 ? pool : keys
+  return pick[Math.floor(Math.random() * pick.length)]
 }
 
 /** 数值兜底与裁剪 */
@@ -103,15 +147,15 @@ export function sleep(ms) {
 }
 
 /**
- * 判断一个 URL 是不是「公网 http(s)」。
+ * 判断一个 URL 是不是「字面上的公网 http(s) 地址」。
  *
  * 用途：图片下载是服务端发起的请求，而 URL 来自群消息（不可信输入），
  * 直接照单全收就变成一个 SSRF 口子 —— 有人发一张 url 指向 127.0.0.1 或
  * 内网地址的图，机器人就替他去请求内网了。
  *
- * 注意：这里只做字面量的地址判定，**不做 DNS 解析**。
- * 攻击者用一个解析到内网 IP 的域名仍然能绕过，要彻底堵住得在下载时
- * 解析并核对对端 IP，那超出这个插件的职责了。
+ * 注意：这里**只做字面量判断，不做 DNS 解析**，所以它只是「第一道粗筛」。
+ * 真正发起请求前必须交给 model/net.js 的 assertUrlAllowed / request：
+ * 那里会解析域名、逐个核对解析出来的地址，并把连接钉在审核过的 IP 上。
  */
 export function isPublicHttpUrl(value) {
   let url
@@ -122,25 +166,19 @@ export function isPublicHttpUrl(value) {
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  if (url.username || url.password) return false
 
-  const host = url.hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
+  const host = String(url.hostname || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '')
   if (!host) return false
 
-  if (host === 'localhost' || host.endsWith('.localhost')) return false
-  if (host === '::1' || host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return false
+  // 这些后缀几乎只出现在内网 / 局域网
+  if (host === 'localhost' || /\.(localhost|local|internal|lan|home|corp|intranet)$/.test(host)) return false
 
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
-  if (ipv4) {
-    const a = Number(ipv4[1])
-    const b = Number(ipv4[2])
-    if (a === 0 || a === 10 || a === 127 || a >= 224) return false
-    if (a === 169 && b === 254) return false
-    if (a === 172 && b >= 16 && b <= 31) return false
-    if (a === 192 && b === 168) return false
-    if (a === 100 && b >= 64 && b <= 127) return false
-  }
+  // IP 字面量：交给统一的地址分类，IPv4 映射 IPv6、6to4、NAT64 都会被正确归类
+  if (net.isIP(host)) return classifyAddress(host) === 'public'
 
-  return true
+  // 不含点也不含冒号的主机名（如 http://intranet/）只能是内网名
+  return host.includes('.') || host.includes(':')
 }
 
 /**
@@ -182,18 +220,20 @@ const BLOCKED_META_HOSTS = new Set([
   '100.100.100.200',            // 阿里云元数据
   '169.254.169.254',            // AWS / GCP / Azure 元数据
   'metadata.google.internal',
-  'metadata.tencentyun.com'
+  'metadata.tencentyun.com',
+  'metadata.azure.com'
 ])
 
 /**
- * 「这个 http(s) 地址值不值得去拉」—— 比 isPublicHttpUrl 宽一档：
- * **允许本机 / 内网地址**。
+ * 「这个 http(s) 地址值不值得去拉」—— 给**适配器自己提供**的资源用。
  *
  * 因为不少适配器（OneBot 系的 NapCat、Lagrange）是拿本机的一个 HTTP 端口
  * 供图和供文件的，地址就是 http://127.0.0.1:xxxx/xxx —— 按「只收公网」的
  * 规矩会把这整类资源挡掉，表现就是「明明有图/有文件，插件却拿不到」。
+ * 所以它和 isPublicHttpUrl 是两套规则，**不能拿它去判断群消息里的地址**。
  *
- * 仍然挡：非 http(s) 协议、链路本地 / 组播地址，以及上面那几个元数据地址。
+ * 即便调用方是适配器资源，真正发请求时也要走 net.js 的审核 + 白名单，
+ * 这里只负责拒掉明显不该碰的目标。
  */
 export function isFetchableUrl(value) {
   let url
@@ -203,15 +243,28 @@ export function isFetchableUrl(value) {
     return false
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  if (url.username || url.password) return false
 
-  const host = url.hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
+  const host = String(url.hostname || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
   if (!host) return false
   if (BLOCKED_META_HOSTS.has(host)) return false
-  if (/^169\.254\./.test(host)) return false        // IPv4 链路本地
-  if (/^fe80:/i.test(host)) return false            // IPv6 链路本地
-  if (/^ff/i.test(host)) return false               // 组播
-  if (/^(0|22[4-9]|23\d|24\d|25[0-5])\./.test(host)) return false
+
+  if (net.isIP(host)) {
+    if (classifyAddress(host) === 'invalid') return false
+    // 链路本地（含 169.254.169.254）与组播一律不碰；回环/私网交给白名单决定
+    if (/^169\.254\./.test(host)) return false
+    return true
+  }
   return true
+}
+
+/**
+ * 模型输出要经过聊天协议发送。有的宿主会把字符串里的 `[CQ:...]` 重新解释成
+ * 图片 / 文件消息段 —— 那就等于让模型（以及能影响模型的群消息）指挥机器人发东西。
+ * 这里只把 CQ 的起始标记换成全角左括号：语义上不再构成 CQ 码，看上去还是「[」。
+ */
+export function escapeCqText(text) {
+  return String(text ?? '').replace(/\[CQ:/gi, '［CQ:')
 }
 
 /**

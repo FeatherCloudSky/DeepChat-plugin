@@ -337,7 +337,7 @@ check('空文本消息被过滤', Provider.buildRequestBody('openai', {
 // ============================================================ 5.1 HTTP 层
 console.log('\n=== 5.1 HTTP 传输层 ===')
 const httpMod = await import(url('model/http.js'))
-check('当前环境使用 fetch', httpMod.transportName(), 'fetch')
+check('传输层走地址钉扎的 node:http', httpMod.transportName(), 'node:http（地址钉扎）')
 checkTrue('导出了 Node 兜底实现', typeof httpMod.postWithNode === 'function')
 
 {
@@ -378,11 +378,11 @@ checkTrue('导出了 Node 兜底实现', typeof httpMod.postWithNode === 'functi
   // 大小上限：不许把超大响应整个读进内存
   let limitError = ''
   try {
-    await httpMod.getBuffer(`http://127.0.0.1:${port}/v1/x`, 5000, 10)
+    await httpMod.getBuffer(`http://127.0.0.1:${port}/v1/x`, 5000, 10, { allowLoopback: true })
   } catch (error) {
     limitError = error.message
   }
-  checkTrue('fetch 链路超过 maxBytes 会抛错', /上限/.test(limitError))
+  checkTrue('getBuffer 超过 maxBytes 会抛错', /上限/.test(limitError))
 
   let limitErrorNode = ''
   try {
@@ -548,7 +548,7 @@ const guobaMod = await import(url('guoba.support.js'))
 const guoba = guobaMod.supportGuoba()
 const tabLabels = guoba.configInfo.schemas.filter((s) => s.component === 'SOFT_GROUP_BEGIN').map((s) => s.label)
 check('锅巴面板标签页', tabLabels,
-  ['API 配置', '模型能力', '基本配置', '分条发送', '上下文与缓存', '启用控制',
+  ['API 配置', '安全与出站', '模型能力', '基本配置', '分条发送', '上下文与缓存', '启用控制',
    '权限设置', '聊天记录', '海龟汤', '群发消息', '伪人模式', '黑白名单设置', '帮助图'])
 checkTrue('含逐模型图片能力字段', guoba.configInfo.schemas.some((s) => s.field === 'modelVision'))
 checkTrue('含帮助背景字段', guoba.configInfo.schemas.some((s) => s.field === 'helpBg'))
@@ -1320,10 +1320,12 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   check('没记过的时候读不到汤面', Soup.get(quiet), null)
 
   const meta = Soup.save(quiet, { text: '他喝了一口汤就哭了' })
+  const soupKey = Soup.keyOf(quiet)
   check('记下的文字读得回来', Soup.get(quiet)?.text, '他喝了一口汤就哭了')
   check('默认存 24 小时', Math.round((meta.expiresAt - meta.createdAt) / 3600000), 24)
-  check('汤面挂在会话上（key = 群号）', meta.key, `group_${gid}`)
-  checkTrue('元信息落了盘', fs.existsSync(path.join(Soup.dir, `group_${gid}.json`)))
+  check('汤面挂在会话上（key 带机器人身份）', meta.key, `b999_group_${gid}`)
+  check('key 里含机器人 self_id', soupKey.includes('b999'), true)
+  checkTrue('元信息落了盘', fs.existsSync(path.join(Soup.dir, `${soupKey}.json`)))
 
   const bytes = Buffer.from('SOUPPNG')
   const withImage = Soup.save(quiet, { text: '', images: [{ data: bytes, ext: '.png', url: 'https://example.com/a.png' }] })
@@ -1343,7 +1345,7 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   check('改了时长立刻按新的算', Math.round((Soup.get(quiet).expiresAt - Date.now()) / 60000), 60)
   Soup.get(quiet).expiresAt = Date.now() - 1
   check('过期后读不到', Soup.get(quiet), null)
-  check('过期后元信息也清掉了', fs.existsSync(path.join(Soup.dir, `group_${gid}.json`)), false)
+  check('过期后元信息也清掉了', fs.existsSync(path.join(Soup.dir, `${soupKey}.json`)), false)
   Cfg.set('soupExpireHours', 24)
 
   // ---- 应用层：记 / 看 / 删
@@ -1417,37 +1419,60 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   check('回出来的字节和存的一致',
     imgView.__raw[1]?.data?.file?.toString('hex'), pngBytes.toString('hex'))
 
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => new Response(Buffer.from('REMOTEIMG'), {
-    status: 200, headers: { 'content-type': 'image/webp' }
+  // ---- 只有 URL 的图：起一个本地 HTTP 服务当图片源。
+  // 「群消息里的地址」只允许公网；本机端口必须显式写进白名单
+  // （适配器自建 HTTP 端口供图就是这种需求）。
+  const httpModule = await import('node:http')
+  const webpBytes = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP'), Buffer.from('VP8 ')])
+  const remoteServer = httpModule.createServer((req, res) => {
+    if (req.url === '/remote.webp') {
+      res.writeHead(200, { 'content-type': 'image/webp' })
+      res.end(webpBytes)
+      return
+    }
+    if (req.url === '/img.png') {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' })
+      res.end(pngBytes)
+      return
+    }
+    res.writeHead(404, { 'content-type': 'text/plain' })
+    res.end('nope')
   })
-  const remoteRecord = quote({ message_id: 'soup-remote', message: [{ type: 'image', url: 'https://example.com/remote.jpg' }] })
+  await new Promise((resolve) => remoteServer.listen(0, '127.0.0.1', resolve))
+  const remotePort = remoteServer.address().port
+  const remoteBase = `http://127.0.0.1:${remotePort}`
+
+  Cfg.set('privateHostAllowList', [`127.0.0.1:${remotePort}`])
+
+  const remoteRecord = quote({ message_id: 'soup-remote', message: [{ type: 'image', url: `${remoteBase}/remote.webp` }] })
   await soupApp.soup(remoteRecord)
   const remoteMeta = Soup.get(remoteRecord)
-  globalThis.fetch = originalFetch
-  check('只有 URL 的图会被下载下来', remoteMeta?.images?.[0]?.bytes, 9)
-  check('扩展名按 content-type 走', remoteMeta?.images?.[0]?.name?.endsWith('.webp'), true)
+  check('只有 URL 的图会被下载下来', remoteMeta?.images?.[0]?.bytes, webpBytes.length)
+  check('扩展名按文件头认，不信 content-type', remoteMeta?.images?.[0]?.name?.endsWith('.webp'), true)
 
-  // 适配器用本机端口供图（NapCat / Lagrange 一类很常见）：必须能拉下来，
-  // 不能按「非公网」一刀切挡掉 —— 那正是「图片汤面存不下」的成因
-  globalThis.fetch = async () => new Response(pngBytes, {
-    status: 200, headers: { 'content-type': 'application/octet-stream' }
+  // 本机端口供图：默认挡掉，写进白名单才放行
+  Cfg.set('privateHostAllowList', [])
+  const blockedLocal = quote({
+    message_id: 'soup-local-blocked',
+    message: [{ type: 'image', url: `${remoteBase}/img.png` }, { type: 'text', text: '内网图测试' }]
   })
-  const localPortRecord = quote({ message_id: 'soup-local', message: [{ type: 'image', url: 'http://127.0.0.1:3000/img.jpg' }] })
+  await soupApp.soup(blockedLocal)
+  checkTrue('默认挡下内网图片地址并说明原因', /非公网|没存下/.test(blockedLocal.__replied[0] || ''))
+  check('被挡下的内网图不会进汤面', Soup.get(blockedLocal)?.images?.length, 0)
+
+  Cfg.set('privateHostAllowList', [`127.0.0.1:${remotePort}`])
+  const localPortRecord = quote({ message_id: 'soup-local', message: [{ type: 'image', url: `${remoteBase}/img.png` }] })
   await soupApp.soup(localPortRecord)
   const localPortMeta = Soup.get(localPortRecord)
-  globalThis.fetch = originalFetch
-  check('本机端口供的图能拉下来', localPortMeta?.images?.length, 1)
+  check('白名单里的本机端口能拉下来', localPortMeta?.images?.length, 1)
   check('类型按文件头认，不看扩展名', localPortMeta?.images?.[0]?.name?.endsWith('.png'), true)
 
   // 下载失败：文字照常记，而且要把原因说出来
-  globalThis.fetch = async () => new Response('nope', { status: 404 })
   const brokenRecord = quote({
     message_id: 'soup-broken',
-    message: [{ type: 'image', url: 'https://example.com/gone.jpg' }, { type: 'text', text: '汤面在这' }]
+    message: [{ type: 'image', url: `${remoteBase}/gone.jpg` }, { type: 'text', text: '汤面在这' }]
   })
   await soupApp.soup(brokenRecord)
-  globalThis.fetch = originalFetch
   check('下载失败时文字照常记', Soup.get(brokenRecord)?.text, '汤面在这')
   checkTrue('下载失败会把原因说出来', /图片下载失败/.test(brokenRecord.__replied[0] || ''))
   check('失败的那张不会留在汤面里', Soup.get(brokenRecord)?.images?.length, 0)
@@ -1514,12 +1539,9 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   }
 
   // 适配器把聊天记录给成 CQ 码字符串时，也要能认出里面的图片
-  globalThis.fetch = async () => new Response(pngBytes, {
-    status: 200, headers: { 'content-type': 'image/png' }
-  })
   const cqRecord = quote({
     message_id: 'soup-cq',
-    message: '[CQ:image,file=abc.image,url=https://example.com/cq.jpg]'
+    message: `[CQ:image,file=abc.image,url=${remoteBase}/img.png]`
   })
   await soupApp.soup(cqRecord)
   check('CQ 码字符串里的图片也能存下', Soup.get(cqRecord)?.images?.length, 1)
@@ -1527,10 +1549,9 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   // OneBot v11 的段结构：{ type: 'image', data: { url } }
   const ob11Record = quote({
     message_id: 'soup-ob11',
-    message: [{ type: 'image', data: { url: 'https://example.com/ob11.jpg' } }]
+    message: [{ type: 'image', data: { url: `${remoteBase}/img.png` } }]
   })
   await soupApp.soup(ob11Record)
-  globalThis.fetch = originalFetch
   check('OneBot 结构的图片也能存下', Soup.get(ob11Record)?.images?.length, 1)
 
   // 命令容错：手机上多打一个空格、或者打了全角 ＃
@@ -1561,7 +1582,7 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
     Cfg.set('soupMaxImageSide', 10000)
 
     const bigFixture = path.join(Soup.dir, 'big.png')
-    fs.writeFileSync(bigFixture, Buffer.concat([pngHead(20000, 20000), Buffer.alloc(2 * 1024 * 1024)]))
+    fs.writeFileSync(bigFixture, Buffer.concat([pngHead(20000, 1000), Buffer.alloc(2 * 1024 * 1024)]))
 
     let asked = null
     const bigEvent = quote({ message_id: 'soup-big', message: [{ type: 'image', file: bigFixture }] })
@@ -1589,7 +1610,7 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   await soupApp.remove(del)
   checkTrue('删除汤面', /已删除/.test(del.__replied[0] || ''))
   check('删完就读不到了', Soup.get(del), null)
-  check('删完元信息文件也没了', fs.existsSync(path.join(Soup.dir, `group_${gid}.json`)), false)
+  check('删完元信息文件也没了', fs.existsSync(path.join(Soup.dir, `${soupKey}.json`)), false)
 
   const afterDelete = evt()
   await soupApp.soup(afterDelete)
@@ -1610,6 +1631,8 @@ console.log('\n=== 6.10 海龟汤汤面 ===')
   Cfg.set('soupEnable', true)
 
   fs.rmSync(fixture, { force: true })
+  Cfg.set('privateHostAllowList', [])
+  await new Promise((resolve) => remoteServer.close(resolve))
 }
 
 // ============================================================ 6.11 发图统一入口

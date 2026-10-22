@@ -1,4 +1,3 @@
-import fs from 'node:fs'
 import path from 'node:path'
 import ChatState from '../model/ChatState.js'
 import Policy from '../model/Policy.js'
@@ -9,13 +8,22 @@ import { segmentsToText } from '../model/Recorder.js'
 import { getBuffer } from '../model/http.js'
 import Cfg from '../model/Cfg.js'
 import { pluginName } from '../config/constant.js'
-import { findQuotedMessage, isFetchableUrl } from '../model/utils.js'
+import { findQuotedMessage } from '../model/utils.js'
+import { readTrustedText } from '../model/safepath.js'
+import { looksLikeText } from '../model/sniff.js'
+import { downloadConcurrency, withSlot } from '../model/concurrency.js'
+import { redactUrl } from '../model/net.js'
 
 /** 当文本读的文件后缀，以及单个人设文件的体积上限 */
 const TEXT_FILE_RE = /\.(txt|md|markdown|json|ya?ml|csv|log|ini|conf)$/i
 const TEXT_FILE_MAX = 1024 * 1024
 
-/** 从文件段里读出文本：本机临时文件优先，其次下载地址，再不行问问适配器 */
+/**
+ * 从文件段里读出文本：本机临时文件优先，其次下载地址，再不行问问适配器。
+ *
+ * file 字段来自消息，不能当路径直接读：只认受信任目录里的文本文件，
+ * 内容不像文本（有 NUL 字节 / 解不出 UTF-8）就拒绝。
+ */
 async function readTextSegment(e, segment) {
   const data = segment?.data && typeof segment.data === 'object' ? segment.data : segment
   const fileField = String(data?.file ?? '')
@@ -27,18 +35,16 @@ async function readTextSegment(e, segment) {
     `${idField ? `，file_id=${idField}` : ''}`
   )
 
-  const candidates = []
   if (fileField && !/^https?:\/\//i.test(fileField)) {
-    candidates.push(fileField, path.resolve(process.cwd(), fileField), path.resolve(process.cwd(), 'data', fileField))
-  }
-  for (const candidate of candidates) {
+    const candidates = [fileField, path.resolve(process.cwd(), fileField), path.resolve(process.cwd(), 'data', fileField)]
     try {
-      if (!fs.existsSync(candidate)) continue
-      const stat = fs.statSync(candidate)
-      if (!stat.isFile() || stat.size === 0 || stat.size > TEXT_FILE_MAX) continue
-      return fs.readFileSync(candidate, 'utf8')
+      const { text } = readTrustedText(candidates, {
+        maxBytes: TEXT_FILE_MAX,
+        extraRoots: Cfg.getIdList('localFileRoots')
+      })
+      return text
     } catch (error) {
-      // 换下一个候选路径继续试
+      logger.warn(`[${pluginName}] 人设文件不可用：${error.message || error}`)
     }
   }
 
@@ -63,19 +69,28 @@ async function readTextSegment(e, segment) {
     }
   }
 
-  if (!url || !isFetchableUrl(url)) {
+  if (!url) {
     logger.warn(`[${pluginName}] 人设文件段里没有可用的下载地址（字段：${Object.keys(data || {}).join(',') || '空'}）`)
     return ''
   }
 
   try {
-    const result = await getBuffer(url, 15000, TEXT_FILE_MAX)
+    const result = await withSlot('download', downloadConcurrency(),
+      () => getBuffer(url, 15000, TEXT_FILE_MAX, {
+        allowPrivate: false,
+        allowLoopback: false,
+        allowHosts: Cfg.getIdList('privateHostAllowList')
+      }))
     if (!result.ok || !result.buffer?.length) {
-      logger.warn(`[${pluginName}] 下载人设文件失败：HTTP ${result.status ?? '?'}`)
+      logger.warn(`[${pluginName}] 下载人设文件失败：HTTP ${result.status ?? '?'}（${redactUrl(url)}）`)
+      return ''
+    }
+    if (!looksLikeText(result.buffer)) {
+      logger.warn(`[${pluginName}] 人设文件的内容不是文本，已拒绝：${redactUrl(url)}`)
       return ''
     }
     logger.mark(`[${pluginName}] 已从文件读入人设：${(result.buffer.length / 1024).toFixed(1)}KB`)
-    return result.buffer.toString('utf8')
+    return result.buffer.toString('utf8').replace(/^\uFEFF/, '')
   } catch (error) {
     logger.warn(`[${pluginName}] 下载人设文件失败：${error.message || error}`)
     return ''
@@ -265,23 +280,37 @@ export class manage extends plugin {
   async status(e) {
     const { enabled, source, override } = Policy.describe(e)
     const info = Provider.describe()
-    const perm = Permission.summary()
-    const count = ChatState.count()
+    const admin = Permission.isAdmin(e)
+
+    // 普通成员只看「这个会话能不能用」和自己的身份。
+    // 完整 API 地址、主人/管理员 QQ、Key 数量都属于运维信息，
+    // 群里的任何人都能发 #chat状态，所以不能一起给出去。
     const lines = [
       `【${pluginName} 状态】`,
       `你的身份：${Permission.roleLabel(e)}`,
       `本会话：${enabled ? '已启用' : '已停用'}`,
       `判定来源：${source}${override === null ? '' : '（会话单独设置）'}`,
-      `协议：${info.provider}　地址：${info.base}${info.fallback ? '（未填写，回落默认）' : ''}`,
+      `协议：${info.provider}`,
       `模型：${info.model}`,
       `思考强度：${info.reasoningEffort}`,
-      `Key 数量：${info.keyCount}`,
-      `传输层：${info.transport}${info.transport === 'fetch' ? '' : '（Node 16 兜底）'}`,
-      `主人：${perm.master}`,
-      `管理员：${perm.admins.length > 0 ? perm.admins.join('、') : '（未设置）'}` +
-        (perm.adminsRaw > perm.maxAdmins ? `（配置了 ${perm.adminsRaw} 个，只生效前 ${perm.maxAdmins} 个）` : ''),
-      `会话开关记录：群 ${count.groupOn} 开 / ${count.groupOff} 关，私聊 ${count.userOn} 开 / ${count.userOff} 关`
+      `传输层：${info.transport}`
     ]
+
+    if (admin) {
+      const perm = Permission.summary()
+      const count = ChatState.count()
+      lines.push(
+        `API 地址：${info.base}${info.fallback ? '（未填写，回落默认）' : ''}`,
+        `Key 数量：${info.keyCount}`,
+        `主人：${perm.master}`,
+        `管理员：${perm.admins.length > 0 ? perm.admins.join('、') : '（未设置）'}` +
+          (perm.adminsRaw > perm.maxAdmins ? `（配置了 ${perm.adminsRaw} 个，只生效前 ${perm.maxAdmins} 个）` : ''),
+        `会话开关记录：群 ${count.groupOn} 开 / ${count.groupOff} 关，私聊 ${count.userOn} 开 / ${count.userOff} 关`
+      )
+    } else {
+      lines.push('API 地址：已配置（地址与密钥信息仅主人/管理员可见）')
+    }
+
     return e.reply(lines.join('\n'))
   }
 }

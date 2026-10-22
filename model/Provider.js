@@ -10,8 +10,10 @@
  */
 import Cfg from './Cfg.js'
 import { pluginName } from '../config/constant.js'
-import { pickApiKey, isBlank, sleep } from './utils.js'
+import { pickApiKey, pickApiKeyExcept, apiKeyList, isBlank, sleep } from './utils.js'
 import { postJson, transportName } from './http.js'
+import { isLoopbackHost, redactUrl } from './net.js'
+import { withSlot, apiConcurrency } from './concurrency.js'
 
 /** 未填写 apiUrl 时，按协议走官方默认地址 */
 const PROVIDER_DEFAULTS = {
@@ -137,6 +139,13 @@ function extractErrorMessage(result) {
 export function classifyError(status, error) {
   if (status === 401 || status === 403) return { type: 'auth', status, retryable: false, message: 'API 鉴权失败，请检查密钥或访问权限。' }
   if (status === 429) return { type: 'rate_limit', status, retryable: true, message: '模型服务限流或额度不足，请稍后再试并检查额度。' }
+  if (error?.code === 'EBLOCKEDTARGET' || error?.name === 'BlockedTargetError') {
+    // 跳转被拒、地址指向内网、地址不合法 —— 都不是「等等再试」能好的
+    return { type: 'blocked', status, retryable: false, message: error.message || 'API 地址被安全规则拒绝。' }
+  }
+  if (error?.code === 'ETRANSFERLIMIT' || error?.name === 'TransferLimitError') {
+    return { type: 'toolarge', status, retryable: false, message: error.message || '模型响应超过体积上限。' }
+  }
   if (status === 408 || error?.name === 'AbortError' || /超时|timeout/i.test(error?.message || '')) {
     return { type: 'timeout', status, retryable: true, message: '模型请求超时，请稍后再试。' }
   }
@@ -370,10 +379,10 @@ export function buildUrl(provider, base) {
 }
 
 /**
- * 发起一次对话请求。
+ * 发起一次对话请求（内部实现；对外统一走下面的 chat()，带上全局并发闸门）。
  * @returns {Promise<string|null>} 成功返回文本，失败返回 null
  */
-async function chat(options = {}) {
+async function chatOnce(options = {}) {
   const report = (failure) => {
     if (typeof options.onError === 'function') options.onError(failure)
     return null
@@ -408,6 +417,36 @@ async function chat(options = {}) {
   }
 
   const url = buildUrl(provider, base)
+
+  // 明文 HTTP 只允许指向本机网关：远程 API 走 http 等于把 Key 和整段对话明文发出去。
+  let target = null
+  try {
+    target = new URL(url)
+  } catch {
+    target = null
+  }
+  if (!target) {
+    logger.error(`[${pluginName}] API 地址不是合法 URL，未发送请求`)
+    return report({ type: 'config', status: 0, retryable: false, message: 'API 地址不是合法 URL，请在面板里检查。' })
+  }
+  const insecureRemote = target.protocol === 'http:' && !isLoopbackHost(target.hostname)
+  if (insecureRemote && !Cfg.getBool('allowInsecureApi', false)) {
+    logger.error(`[${pluginName}] API 地址是明文 HTTP 且不在本机（${redactUrl(url)}），已拒绝发送请求`)
+    return report({
+      type: 'config',
+      status: 0,
+      retryable: false,
+      message: 'API 地址必须使用 HTTPS（本机网关可以保留 http://127.0.0.1）。确需明文时请在面板打开「允许明文 HTTP API」。'
+    })
+  }
+  if (insecureRemote) {
+    logger.warn(`[${pluginName}] 已按配置允许明文 HTTP 的远程 API：${redactUrl(url)}`)
+  }
+
+  // 响应体上限与「整条请求的截止时间」由传输层保证（见 model/net.js）
+  const responseMaxBytes = Math.round(Cfg.getNumber('maxResponseMB', 8, 1, 128) * 1024 * 1024)
+  const transferPolicy = { allowPrivate: true, allowLoopback: true, maxBytes: responseMaxBytes }
+
   let effort = normalizeReasoningEffort(options.reasoningEffort ?? Cfg.get('reasoningEffort', ''))
   const makeBody = (level) => buildRequestBody(provider, {
     model,
@@ -420,14 +459,17 @@ async function chat(options = {}) {
     imageDetail: provider === 'openai' ? normalizeImageDetail(Cfg.get('imageDetail', '')) : ''
   })
   let body = makeBody(effort)
+  let lastKey = apiKey
   for (let attempt = 1; attempt <= attemptMax; attempt++) {
     const startedAt = Date.now()
     let status = 0
     let retryWait = 0
     try {
-      // 可恢复错误的下一次尝试使用下一个密钥。
-      const headers = buildHeaders(provider, attempt === 1 ? apiKey : (pickApiKey(Cfg.get('apiKey', '')) || apiKey), anthropicVersion)
-      const result = await postJson(url, headers, body, timeoutMs)
+      // 可恢复错误的下一次尝试换一个**不同**的密钥（只排除刚失败的那个）
+      const keyForAttempt = attempt === 1 ? apiKey : (pickApiKeyExcept(Cfg.get('apiKey', ''), lastKey) || apiKey)
+      lastKey = keyForAttempt
+      const headers = buildHeaders(provider, keyForAttempt, anthropicVersion)
+      const result = await postJson(url, headers, body, timeoutMs, transferPolicy)
       status = result.status
       retryWait = result.retryAfterMs || 0
 
@@ -467,13 +509,41 @@ async function chat(options = {}) {
   return null
 }
 
-/** 供 #chat状态 使用：不暴露 key，只报告配置是否完整 */
+/**
+ * 对外入口：全局并发闸门 + 一次对话请求。
+ *
+ * 单会话排队解决不了「很多私聊同时打 API」：这里按面板配置的
+ * apiMaxConcurrent 限制全进程同时在飞的模型请求数，排队超时直接报错，
+ * 而不是让消息无限期挂着。
+ */
+async function chat(options = {}) {
+  try {
+    return await withSlot('api', apiConcurrency(), () => chatOnce(options))
+  } catch (error) {
+    if (error?.name === 'ConcurrencyLimitError') {
+      if (typeof options.onError === 'function') {
+        options.onError({ type: 'busy', status: 0, retryable: true, message: error.message })
+      }
+      return null
+    }
+    throw error
+  }
+}
+
+/** 供 #chat状态 使用：不暴露 key，也不返回带 query/凭据的完整地址 */
 function describe() {
   const { provider, base, fallback } = resolveEndpoint()
-  const keys = String(Cfg.get('apiKey', '')).replace(/[，；;\n]/g, ',').split(',').map((k) => k.trim()).filter(Boolean)
+  const keys = apiKeyList(Cfg.get('apiKey', ''))
+  let host = ''
+  try {
+    host = new URL(base).host
+  } catch {
+    host = ''
+  }
   return {
     provider,
-    base,
+    base: redactUrl(base),
+    host,
     fallback,
     keyCount: keys.length,
     model: Cfg.get('model', '') || PROVIDER_DEFAULT_MODEL[provider],

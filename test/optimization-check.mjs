@@ -219,21 +219,47 @@ if (process.argv[2] !== '--isolated') {
   check('Retry-After 秒数', retryAfterMs('2'), 2000)
   check('Retry-After 日期', retryAfterMs('Thu, 01 Jan 1970 00:00:05 GMT', 1000), 4000)
 
-  // 脚本化 fetch 响应验证请求次数、错误隔离与重试行为。
-  const realFetch = globalThis.fetch
-  Cfg.setMany({ apiKey: 'secret-key-one,secret-key-two', apiUrl: 'https://example.com/v1', model: 'test', useAnthropic: false, reasoningEffort: '', attemptMax: 3 })
+  // 脚本化 HTTP 响应验证请求次数、错误隔离与重试行为。
+  // 传输层已经统一成 node:http（DNS 钉扎、默认不跟随跳转），
+  // 所以这里起一个真实的本地服务来演「服务商」，而不是替换 globalThis.fetch。
+  const httpModule = await import('node:http')
+  let script = []
+  let calls = 0
+  const seenAuth = []
+  const stub = httpModule.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      seenAuth.push(req.headers.authorization || '')
+      const step = script[Math.min(calls++, script.length - 1)] || { status: 500, body: {} }
+      if (step.drop) {
+        req.socket.destroy()
+        return
+      }
+      res.writeHead(step.status, { 'content-type': 'application/json', ...(step.headers || {}) })
+      res.end(JSON.stringify(step.body || {}))
+    })
+  })
+  await new Promise((resolve) => stub.listen(0, '127.0.0.1', resolve))
+  const stubBase = `http://127.0.0.1:${stub.address().port}/v1`
+
+  Cfg.setMany({
+    apiKey: 'secret-key-one,secret-key-two',
+    apiUrl: stubBase,
+    model: 'test',
+    useAnthropic: false,
+    reasoningEffort: '',
+    attemptMax: 3
+  })
+
   const invoke = async (responses) => {
-    let calls = 0, failure = null
-    const headers = []
-    globalThis.fetch = async (url, options) => {
-      headers.push(options.headers.authorization)
-      const response = responses[Math.min(calls++, responses.length - 1)]
-      if (response instanceof Error) throw response
-      return new Response(JSON.stringify(response.body), { status: response.status, headers: response.headers })
-    }
+    script = responses
+    calls = 0
+    seenAuth.length = 0
+    let failure = null
     const answer = await Provider.chat({ messages: [{ role: 'user', content: '测试' }], onError: (error) => { failure = error } })
-    return { calls, failure, answer, headers }
+    return { calls, failure, answer, headers: [...seenAuth] }
   }
+
   try {
     const unauthorized = await invoke([{ status: 401, body: { error: { message: 'secret-key-one' } } }])
     check('真实请求路径鉴权失败只请求一次', unauthorized.calls, 1)
@@ -245,21 +271,35 @@ if (process.argv[2] !== '--isolated') {
     const retried = await invoke([{ status: 429, body: { error: {} } }, ok])
     check('限流之后重试成功', [retried.calls, retried.answer], [2, '恢复成功'])
     check('可恢复错误重试时轮换密钥', retried.headers[0] !== retried.headers[1], true)
-    const server = await invoke([{ status: 503, body: {} }, ok])
-    check('服务异常之后重试成功', [server.calls, server.answer], [2, '恢复成功'])
+    const serverError = await invoke([{ status: 503, body: {} }, ok])
+    check('服务异常之后重试成功', [serverError.calls, serverError.answer], [2, '恢复成功'])
     const longWait = await invoke([{ status: 429, body: {}, headers: { 'retry-after': '30' } }])
     check('长 Retry-After 不提前重试', longWait.calls, 1)
-    const timeout = new Error('连接超时'); timeout.name = 'AbortError'
-    const timed = await invoke([timeout, ok])
-    check('超时之后可重试', [timed.calls, timed.answer], [2, '恢复成功'])
+    const timed = await invoke([{ drop: true }, ok])
+    check('连接中断之后可重试', [timed.calls, timed.answer], [2, '恢复成功'])
     Cfg.set('reasoningEffort', 'max')
     const unrelated = await invoke([{ status: 400, body: { error: { message: 'Invalid image' } } }])
     check('max 下图片报错不盲目降档', unrelated.calls, 1)
-  } finally { globalThis.fetch = realFetch }
+
+    // 明文 HTTP 只许本机：远程 http 地址必须在发请求之前就被拒绝
+    Cfg.set('apiUrl', 'http://example.com/v1')
+    const remotePlain = await invoke([ok])
+    check('远程明文 HTTP 不发请求', remotePlain.calls, 0)
+    check('远程明文 HTTP 给出配置错误', remotePlain.failure.type, 'config')
+    Cfg.set('apiUrl', stubBase)
+
+    // 跳转不跟随：服务端返回 307 时，正文与认证头不会再被送到下一跳
+    const redirect = await invoke([{ status: 307, body: {}, headers: { location: 'https://example.com/other' } }])
+    check('307 跳转不被跟随', redirect.calls, 1)
+    check('跳转按被拒绝处理', redirect.failure.type, 'blocked')
+  } finally {
+    Cfg.set('reasoningEffort', '')
+    await new Promise((resolve) => stub.close(resolve))
+  }
 
   const cfgBefore = fs.readFileSync(Cfg.files.USER_FILE, 'utf8')
   const stateBefore = fs.readFileSync(State.file, 'utf8')
-  for (const name of ['offline-check.mjs', 'consistency-check.mjs']) {
+  for (const name of ['offline-check.mjs', 'consistency-check.mjs', 'security-check.mjs']) {
     const result = spawnSync(process.execPath, [path.join(root, 'test', name)], { cwd: root, stdio: 'inherit', timeout: 30000 })
     if (result.error || result.status !== 0) console.error(result.error?.message || result.stdout || result.stderr)
     check(`${name} 临时副本执行成功`, result.status, 0)

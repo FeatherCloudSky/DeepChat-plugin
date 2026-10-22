@@ -7,14 +7,14 @@
  *
  * 结构：
  * {
- *   "groups": { "123456": true, "234567": false },
- *   "users":  { "10001": false },
- *   "groupPrompts": { "123456": "群用人设" },
- *   "userPrompts":  { "10001": "私聊人设" }
+ *   "groups": { "1234567890:123456": true },
+ *   "users":  { "1234567890:10001": false },
+ *   "groupPrompts": { "1234567890:123456": "群用人设" },
+ *   "userPrompts":  { "1234567890:10001": "私聊人设" }
  * }
- * 未出现在这里的会话，走配置里的默认值 + 启用/禁用列表。
- * 后两个桶存的是人设文件名（兼容旧版序号），
- * 没出现过就用面板里的默认人设。
+ * 键里的前缀是机器人自己的 QQ（self_id）：多机器人共用一个 Redis / 进程时，
+ * 同一个群在 A 机器人上关掉、在 B 机器人上开着，是两个独立的事实，不能混。
+ * 老版本存的是不带前缀的纯群号/QQ 号，读取时会回退去查那一种，写新值时不再生成。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -76,8 +76,26 @@ function promptBucket(e) {
   return e.isGroup ? state.groupPrompts : state.userPrompts
 }
 
+/** 机器人身份：多机器人共用一个进程/Redis 时必须区分开 */
+function botOf(e) {
+  const id = String(e?.self_id ?? e?.selfId ?? '').trim()
+  return id || 'default'
+}
+
+/** 新格式：<self_id>:<群号或QQ号> */
 function sessionKey(e) {
+  return `${botOf(e)}:${String(e.isGroup ? e.group_id : e.user_id)}`
+}
+
+/** 旧格式：只有群号/QQ号，只在读书时兜底 */
+function legacyKey(e) {
   return String(e.isGroup ? e.group_id : e.user_id)
+}
+
+function readScoped(bucketMap, e) {
+  const scoped = bucketMap[sessionKey(e)]
+  if (scoped !== undefined) return scoped
+  return bucketMap[legacyKey(e)]
 }
 
 load()
@@ -85,17 +103,23 @@ load()
 const ChatState = {
   /** 返回 true / false / null（null 表示没有单独设置过） */
   getOverride(e) {
-    const value = bucket(e)[sessionKey(e)]
+    const value = readScoped(bucket(e), e)
     return typeof value === 'boolean' ? value : null
   },
 
   setOverride(e, enabled) {
-    return updateState(() => { bucket(e)[sessionKey(e)] = Boolean(enabled) }) ? Boolean(enabled) : null
+    return updateState(() => {
+      bucket(e)[sessionKey(e)] = Boolean(enabled)
+      delete bucket(e)[legacyKey(e)]
+    }) ? Boolean(enabled) : null
   },
 
   /** 清除单个会话的设置，回到默认策略 */
   clearOverride(e) {
-    return updateState(() => { delete bucket(e)[sessionKey(e)] })
+    return updateState(() => {
+      delete bucket(e)[sessionKey(e)]
+      delete bucket(e)[legacyKey(e)]
+    })
   },
 
   /** 清空所有会话设置 */
@@ -109,17 +133,23 @@ const ChatState = {
    * 没设过返回 null。
    */
   getPromptChoice(e) {
-    const value = promptBucket(e)[sessionKey(e)]
+    const value = readScoped(promptBucket(e), e)
     return value === undefined || value === null || value === '' ? null : String(value)
   },
 
   setPromptChoice(e, choice) {
-    return updateState(() => { promptBucket(e)[sessionKey(e)] = String(choice) }) ? String(choice) : null
+    return updateState(() => {
+      promptBucket(e)[sessionKey(e)] = String(choice)
+      delete promptBucket(e)[legacyKey(e)]
+    }) ? String(choice) : null
   },
 
   /** 清除本会话的人设选择，回到面板默认 */
   clearPromptChoice(e) {
-    return updateState(() => { delete promptBucket(e)[sessionKey(e)] })
+    return updateState(() => {
+      delete promptBucket(e)[sessionKey(e)]
+      delete promptBucket(e)[legacyKey(e)]
+    })
   },
 
   /** 统计数量，供 #chat状态 展示 */
