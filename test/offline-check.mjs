@@ -548,7 +548,7 @@ const guobaMod = await import(url('guoba.support.js'))
 const guoba = guobaMod.supportGuoba()
 const tabLabels = guoba.configInfo.schemas.filter((s) => s.component === 'SOFT_GROUP_BEGIN').map((s) => s.label)
 check('锅巴面板标签页', tabLabels,
-  ['API 配置', '安全与出站', '模型能力', '基本配置', '分条发送', '上下文与缓存', '启用控制',
+  ['API 配置', '工具配置', '安全与出站', '模型能力', '基本配置', '分条发送', '上下文与缓存', '启用控制',
    '权限设置', '聊天记录', '海龟汤', '群发消息', '伪人模式', '黑白名单设置', '帮助图'])
 checkTrue('含逐模型图片能力字段', guoba.configInfo.schemas.some((s) => s.field === 'modelVision'))
 checkTrue('含帮助背景字段', guoba.configInfo.schemas.some((s) => s.field === 'helpBg'))

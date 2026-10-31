@@ -63,6 +63,14 @@ export function supportGuoba() {
         // ---------------------------------------------------------- API 配置
         { label: 'API 配置', component: 'SOFT_GROUP_BEGIN' },
         {
+          field: 'existingConfig',
+          label: '选择已有配置',
+          component: 'GSubForm',
+          componentProps: {
+            multiple: false,
+            modalProps: { title: '选择已有配置' },
+            schemas: [
+        {
           field: 'selectSavedModel',
           label: '选择已保存的模型',
           bottomHelpMessage: '选一个已记住的模型并保存即可切换；手动填写模型后保存会自动记住。新增预设后请刷新面板。',
@@ -79,16 +87,19 @@ export function supportGuoba() {
         {
           field: 'savedModels',
           label: '已保存的模型',
-          bottomHelpMessage: '可手动新增或删除整行，保存后刷新面板。删除当前模型的记忆不会改变正在使用的模型。',
-          component: 'GSubForm',
-          componentProps: { multiple: true, schemas: [{ field: 'value', label: '模型名称', component: 'Input', required: true }] }
+          bottomHelpMessage: '可手动新增或删除标签，保存后刷新面板。删除当前模型的记忆不会改变正在使用的模型。',
+          component: 'GTags',
+          componentProps: { allowAdd: true, allowDel: true }
         },
         {
           field: 'savedApiUrls',
           label: '已保存的 API 地址',
-          bottomHelpMessage: '可手动新增或删除整行，保存后刷新面板。删除当前地址的记忆不会改变正在使用的地址。只接受 http(s) 基础地址，不能含账号、密码、查询参数或片段。',
-          component: 'GSubForm',
-          componentProps: { multiple: true, schemas: [{ field: 'value', label: 'API 地址', component: 'Input', required: true }] }
+          bottomHelpMessage: '可手动新增或删除标签，保存后刷新面板。删除当前地址的记忆不会改变正在使用的地址。只接受 http(s) 基础地址，不能含账号、密码、查询参数或片段。',
+          component: 'GTags',
+          componentProps: { allowAdd: true, allowDel: true }
+        },
+            ]
+          }
         },
         {
           field: 'useAnthropic',
@@ -167,6 +178,41 @@ export function supportGuoba() {
         },
 
         // ---------------------------------------------------------- 网络与文件安全
+        { label: '工具配置', component: 'SOFT_GROUP_BEGIN' },
+        {
+          field: 'webSearchEnabled', label: '启用联网搜索', component: 'Switch',
+          bottomHelpMessage: '开启后模型可以按需发起搜索；搜索词会发送给搜索服务。需要模型支持工具调用。'
+        },
+        {
+          field: 'webSearchMode', label: '联网工具', component: 'Select',
+          componentProps: { options: [
+            { label: '小米 MiMo 原生联网', value: 'mimo' },
+            { label: 'Tavily 搜索', value: 'tavily' },
+            { label: '自定义 Tavily 兼容接口', value: 'compatible' }
+          ] },
+          bottomHelpMessage: 'MiMo 原生联网需在小米平台开通联网服务，仅支持 OpenAI 兼容协议；各服务的联网调用可能额外收费。'
+        },
+        {
+          field: 'webSearchApiKey', label: '搜索服务 Key', component: 'InputPassword',
+          componentProps: { placeholder: 'tvly-******' }
+        },
+        {
+          field: 'webSearchUrl', label: '自定义搜索接口地址', component: 'Input',
+          bottomHelpMessage: '仅自定义 Tavily 兼容接口使用；填写完整 HTTPS 地址，接口请求和响应需兼容 Tavily。'
+        },
+        {
+          field: 'webSearchForce', label: 'MiMo 强制联网', component: 'Switch',
+          bottomHelpMessage: '仅 MiMo 原生联网使用；关闭时由模型决定是否搜索。'
+        },
+        {
+          field: 'webSearchMaxResults', label: '每次搜索结果数', component: 'InputNumber',
+          componentProps: { min: 1, max: 10, step: 1 }
+        },
+        {
+          field: 'webSearchMaxCalls', label: '联网调用上限', component: 'InputNumber',
+          bottomHelpMessage: 'Tavily / 兼容接口：每轮最多调用次数；MiMo：每轮最多搜索关键词数。',
+          componentProps: { min: 1, max: 5, step: 1 }
+        },
         { label: '安全与出站', component: 'SOFT_GROUP_BEGIN' },
         {
           field: 'downloadMaxConcurrent',
@@ -851,12 +897,25 @@ export function supportGuoba() {
       getConfigData() {
         // promptIndex 是「人设文件」的映射，不是普通配置项：
         // 每次现从文件里算，而且**只回名字、不回内容** —— 内容进了请求体就会撞 100KB
-        return { ...Cfg.getAll(), promptIndex: Prompt.panelRows(), selectSavedModel: '', selectSavedApiUrl: '' }
+        const config = Cfg.getAll()
+        return { ...config, promptIndex: Prompt.panelRows(), existingConfig: {
+          selectSavedModel: '', selectSavedApiUrl: '',
+          savedModels: (normalizePresets(config.savedModels) || []).map(row => row.value),
+          savedApiUrls: (normalizePresets(config.savedApiUrls) || []).map(row => row.value)
+        } }
       },
 
       setConfigData(data, { Result }) {
         const plain = { ...data }
         delete plain.promptIndex        // 这栏只往文件里写，不进配置
+        const existing = plain.existingConfig
+        delete plain.existingConfig
+        if (existing !== undefined) {
+          if (!existing || typeof existing !== 'object' || Array.isArray(existing)) return Result.error('已有配置格式无效')
+          for (const key of ['selectSavedModel', 'selectSavedApiUrl', 'savedModels', 'savedApiUrls']) {
+            if (Object.prototype.hasOwnProperty.call(existing, key)) plain[key] = existing[key]
+          }
+        }
         const selectedModel = plain.selectSavedModel
         const selectedUrl = plain.selectSavedApiUrl
         delete plain.selectSavedModel

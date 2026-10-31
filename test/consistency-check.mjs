@@ -89,7 +89,7 @@ const guobaFields = [...guobaSrc.matchAll(/field:\s*'([^']+)'/g)].map((m) => m[1
 // GSubForm 的 schemas 里的字段是「列表的一行」，不是顶层配置键，排除掉
 const SUBFORM_FIELDS = new Set(['key', 'vision', 'title', 'content', 'groups', 'users', 'value'])
 // 这两个是面板的一次性操作，不是落盘配置字段。
-const VIRTUAL_FIELDS = new Set(['selectSavedModel', 'selectSavedApiUrl'])
+const VIRTUAL_FIELDS = new Set(['existingConfig', 'selectSavedModel', 'selectSavedApiUrl'])
 const topFields = guobaFields.filter((f) => !SUBFORM_FIELDS.has(f) && !VIRTUAL_FIELDS.has(f))
 
 const guobaMissing = topFields.filter((f) => !(f in defaults))

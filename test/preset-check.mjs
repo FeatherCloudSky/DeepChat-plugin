@@ -18,6 +18,8 @@ const save = data => panel().setConfigData(data, { Result })
 const values = key => Cfg.get(key, []).map(row => row.value)
 let checks = 0
 function check(name, actual, expected) { assert.deepEqual(actual, expected, name); checks++; console.log(`PASS ${name}`) }
+const group = panel().schemas.find(row => row.field === 'existingConfig')
+check('四个选项位于单个折叠入口', group.componentProps.schemas.map(row => row.field), ['selectSavedModel', 'selectSavedApiUrl', 'savedModels', 'savedApiUrls'])
 
 // 模拟旧版已配置的数据，不依赖真实密钥和用户配置。
 check('设置旧配置', Cfg.setMany({ model: 'legacy-model', apiUrl: 'https://legacy.invalid/v1', apiKey: 'TEST_OLD_KEY' }), true)
@@ -29,9 +31,14 @@ check('旧 Key 保持不变', Cfg.get('apiKey'), 'TEST_OLD_KEY')
 check('手动新增模型和地址', save({ model: 'model-two', apiUrl: 'https://second.invalid/v1', apiKey: 'TEST_NEW_KEY' }).ok, true)
 check('两个模型均保存', values('savedModels'), ['legacy-model', 'model-two'])
 check('两个地址均保存', values('savedApiUrls'), ['https://legacy.invalid/v1', 'https://second.invalid/v1'])
+const grouped = panel().getConfigData().existingConfig
+check('折叠入口读取已保存模型', grouped.savedModels, ['legacy-model', 'model-two'])
+check('折叠入口选择已保存模型', save({ existingConfig: { ...grouped, selectSavedModel: 'legacy-model' } }).ok, true)
+check('折叠入口选择生效', Cfg.get('model'), 'legacy-model')
 check('切换地址时明确更新 Key 可用', Cfg.get('apiKey'), 'TEST_NEW_KEY')
-const modelOptions = panel().schemas.find(field => field.field === 'selectSavedModel').componentProps.options.map(option => option.value)
-const urlOptions = panel().schemas.find(field => field.field === 'selectSavedApiUrl').componentProps.options.map(option => option.value)
+const childFields = panel().schemas.find(field => field.field === 'existingConfig').componentProps.schemas
+const modelOptions = childFields.find(field => field.field === 'selectSavedModel').componentProps.options.map(option => option.value)
+const urlOptions = childFields.find(field => field.field === 'selectSavedApiUrl').componentProps.options.map(option => option.value)
 check('重新打开面板可以选择模型', modelOptions, ['', 'legacy-model', 'model-two'])
 check('重新打开面板可以选择地址', urlOptions, ['', 'https://legacy.invalid/v1', 'https://second.invalid/v1'])
 
@@ -42,7 +49,7 @@ check('选择已有地址', save({ selectSavedApiUrl: 'https://legacy.invalid/v1
 check('选择地址生效', Cfg.get('apiUrl'), 'https://legacy.invalid/v1')
 check('切换地址不沿用旧 Key', Cfg.get('apiKey'), '')
 
-check('删除当前记录', save({ savedModels: [{ value: 'model-two' }], savedApiUrls: [{ value: 'https://second.invalid/v1' }] }).ok, true)
+check('折叠入口删除当前记录', save({ existingConfig: { savedModels: ['model-two'], savedApiUrls: ['https://second.invalid/v1'] } }).ok, true)
 check('删除后模型列表', values('savedModels'), ['model-two'])
 check('删除后地址列表', values('savedApiUrls'), ['https://second.invalid/v1'])
 check('删除当前记录不改变模型', Cfg.get('model'), 'legacy-model')
