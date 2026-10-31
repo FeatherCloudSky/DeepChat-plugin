@@ -87,8 +87,10 @@ const guobaSrc = fs.readFileSync(path.join(pluginDir, 'guoba.support.js'), 'utf8
 const guobaFields = [...guobaSrc.matchAll(/field:\s*'([^']+)'/g)].map((m) => m[1])
 
 // GSubForm 的 schemas 里的字段是「列表的一行」，不是顶层配置键，排除掉
-const SUBFORM_FIELDS = new Set(['key', 'vision', 'title', 'content', 'groups', 'users'])
-const topFields = guobaFields.filter((f) => !SUBFORM_FIELDS.has(f))
+const SUBFORM_FIELDS = new Set(['key', 'vision', 'title', 'content', 'groups', 'users', 'value'])
+// 这两个是面板的一次性操作，不是落盘配置字段。
+const VIRTUAL_FIELDS = new Set(['selectSavedModel', 'selectSavedApiUrl'])
+const topFields = guobaFields.filter((f) => !SUBFORM_FIELDS.has(f) && !VIRTUAL_FIELDS.has(f))
 
 const guobaMissing = topFields.filter((f) => !(f in defaults))
 if (guobaMissing.length) fail('面板里有但默认配置里没有：' + guobaMissing.join(', '))

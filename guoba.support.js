@@ -9,6 +9,36 @@ import Prompt from './model/Prompt.js'
 import path from 'node:path'
 import { pluginResources } from './config/constant.js'
 
+// 预设只记录模型名和地址，绝不保存密钥。每行以 value 作为唯一标识。
+function normalizePresets(rows) {
+  if (!Array.isArray(rows)) return null
+  const seen = new Set()
+  const out = []
+  for (const row of rows) {
+    const value = typeof row === 'string' ? row.trim() : (typeof row?.value === 'string' ? row.value.trim() : '')
+    if (!value) continue
+    if (value.length > 2048 || /[\r\n]/.test(value)) return null
+    if (!seen.has(value)) { seen.add(value); out.push({ value }) }
+    if (out.length > 100) return null
+  }
+  return out
+}
+
+function presetOptions(key) {
+  const rows = normalizePresets(Cfg.get(key, [])) || []
+  return [{ label: '不切换', value: '' }, ...rows.map(({ value }) => ({ label: value, value }))]
+}
+
+function validPresetUrl(value) {
+  try {
+    if (/[?#]/.test(value)) return false
+    const parsed = new URL(value)
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && Boolean(parsed.hostname) && !parsed.username && !parsed.password
+  } catch {
+    return false
+  }
+}
+
 export function supportGuoba() {
   return {
     pluginInfo: {
@@ -32,6 +62,34 @@ export function supportGuoba() {
       schemas: [
         // ---------------------------------------------------------- API 配置
         { label: 'API 配置', component: 'SOFT_GROUP_BEGIN' },
+        {
+          field: 'selectSavedModel',
+          label: '选择已保存的模型',
+          bottomHelpMessage: '选一个已记住的模型并保存即可切换；手动填写模型后保存会自动记住。新增预设后请刷新面板。',
+          component: 'Select',
+          componentProps: { options: presetOptions('savedModels') }
+        },
+        {
+          field: 'selectSavedApiUrl',
+          label: '选择已保存的 API 地址',
+          bottomHelpMessage: '选一个地址并保存即可切换；切换地址时原 Key 会清空，请填写新服务商的 Key 并核对协议。新增预设后请刷新面板。',
+          component: 'Select',
+          componentProps: { options: presetOptions('savedApiUrls') }
+        },
+        {
+          field: 'savedModels',
+          label: '已保存的模型',
+          bottomHelpMessage: '可手动新增或删除整行，保存后刷新面板。删除当前模型的记忆不会改变正在使用的模型。',
+          component: 'GSubForm',
+          componentProps: { multiple: true, schemas: [{ field: 'value', label: '模型名称', component: 'Input', required: true }] }
+        },
+        {
+          field: 'savedApiUrls',
+          label: '已保存的 API 地址',
+          bottomHelpMessage: '可手动新增或删除整行，保存后刷新面板。删除当前地址的记忆不会改变正在使用的地址。只接受 http(s) 基础地址，不能含账号、密码、查询参数或片段。',
+          component: 'GSubForm',
+          componentProps: { multiple: true, schemas: [{ field: 'value', label: 'API 地址', component: 'Input', required: true }] }
+        },
         {
           field: 'useAnthropic',
           label: '使用 Anthropic 协议',
@@ -793,17 +851,52 @@ export function supportGuoba() {
       getConfigData() {
         // promptIndex 是「人设文件」的映射，不是普通配置项：
         // 每次现从文件里算，而且**只回名字、不回内容** —— 内容进了请求体就会撞 100KB
-        return { ...Cfg.getAll(), promptIndex: Prompt.panelRows() }
+        return { ...Cfg.getAll(), promptIndex: Prompt.panelRows(), selectSavedModel: '', selectSavedApiUrl: '' }
       },
 
       setConfigData(data, { Result }) {
-        if (Array.isArray(data?.promptIndex)) {
-          if (!Prompt.applyPanelRows(data.promptIndex).ok) {
-            return Result.error('人设保存失败，请检查数据目录权限或磁盘空间，刷新面板后重试')
-          }
-        }
         const plain = { ...data }
         delete plain.promptIndex        // 这栏只往文件里写，不进配置
+        const selectedModel = plain.selectSavedModel
+        const selectedUrl = plain.selectSavedApiUrl
+        delete plain.selectSavedModel
+        delete plain.selectSavedApiUrl
+
+        const models = normalizePresets(plain.savedModels ?? Cfg.get('savedModels', []))
+        const urls = normalizePresets(plain.savedApiUrls ?? Cfg.get('savedApiUrls', []))
+        if (!models || !urls) return Result.error('模型或地址预设格式无效（最多 100 条，每条最多 2048 字符）')
+        if ((selectedModel != null && typeof selectedModel !== 'string') || (selectedUrl != null && typeof selectedUrl !== 'string')) {
+          return Result.error('选择的模型或地址格式无效')
+        }
+        if (selectedModel && !models.some(row => row.value === selectedModel)) return Result.error('所选模型不存在，请刷新面板')
+        if (selectedUrl && !urls.some(row => row.value === selectedUrl)) return Result.error('所选 API 地址不存在，请刷新面板')
+
+        const previousModel = String(Cfg.get('model', ''))
+        const previousUrl = String(Cfg.get('apiUrl', ''))
+        if (selectedModel) plain.model = selectedModel
+        if (selectedUrl) plain.apiUrl = selectedUrl
+        const initialized = Cfg.getBool('presetMemoryInitialized', false)
+        const remember = (list, value) => {
+          const text = typeof value === 'string' ? value.trim() : ''
+          if (text && !list.some(row => row.value === text)) list.push({ value: text })
+        }
+        if (!initialized || (typeof plain.model === 'string' && plain.model !== previousModel)) remember(models, plain.model ?? previousModel)
+        const addressToRemember = plain.apiUrl ?? previousUrl
+        // 旧配置可能包含查询串等敏感信息：不阻断其他面板配置的保存，也不把它复制到预设。
+        const legacyUrlSkipped = !initialized && addressToRemember === previousUrl &&
+          Boolean(previousUrl) && !validPresetUrl(previousUrl)
+        if (!legacyUrlSkipped && (!initialized || (typeof plain.apiUrl === 'string' && plain.apiUrl !== previousUrl))) remember(urls, addressToRemember)
+        if (!normalizePresets(models) || !normalizePresets(urls)) return Result.error('模型或地址预设超出数量或长度上限')
+        if (urls.some(row => !validPresetUrl(row.value))) {
+          return Result.error('API 地址预设必须是合法的 http(s) 基础地址，且不能包含账号、密码、查询参数或片段')
+        }
+        plain.savedModels = models
+        plain.savedApiUrls = urls
+        plain.presetMemoryInitialized = true
+
+        const keyCleared = Boolean(typeof plain.apiUrl === 'string' && plain.apiUrl !== previousUrl &&
+          (plain.apiKey === undefined || plain.apiKey === Cfg.get('apiKey', '')))
+        if (keyCleared) plain.apiKey = ''
 
         // 先把「哪些字段不合法」说清楚，再谈落盘。
         // 只说「保存失败，检查权限」会让面板字段漂移这种问题极难排查。
@@ -811,8 +904,12 @@ export function supportGuoba() {
         if (!checked.ok) {
           return Result.error(`以下配置项无法保存：${checked.rejected.slice(0, 5).join('；')}`)
         }
+        if (Array.isArray(data?.promptIndex) && !Prompt.applyPanelRows(data.promptIndex).ok) {
+          return Result.error('人设保存失败，请检查数据目录权限或磁盘空间，刷新面板后重试')
+        }
         if (!Cfg.setMany(checked.clean)) return Result.error('配置保存失败，请检查数据目录权限或磁盘空间')
-        return Result.ok({}, '保存成功')
+        return Result.ok({}, keyCleared ? '已切换地址并清空原 Key，请填写新服务商的 Key 并核对协议' :
+          legacyUrlSkipped ? '保存成功；旧 API 地址包含不支持的部分，未加入地址预设' : '保存成功')
       }
     }
   }
