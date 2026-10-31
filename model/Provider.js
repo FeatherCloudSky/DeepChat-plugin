@@ -464,14 +464,30 @@ async function chatOnce(options = {}) {
     const startedAt = Date.now()
     let status = 0
     let retryWait = 0
+    const captureRaw = (result) => {
+      if (typeof options.onRawResponse !== 'function') return
+      try {
+        options.onRawResponse({ attempt, status: result.status, text: result.text })
+      } catch {
+        // 调试回调不应干扰正常请求，也不能把响应或密钥写进日志。
+        logger.warn(`[${pluginName}] 调试响应回调失败`)
+      }
+    }
     try {
       // 可恢复错误的下一次尝试换一个**不同**的密钥（只排除刚失败的那个）
       const keyForAttempt = attempt === 1 ? apiKey : (pickApiKeyExcept(Cfg.get('apiKey', ''), lastKey) || apiKey)
       lastKey = keyForAttempt
       const headers = buildHeaders(provider, keyForAttempt, anthropicVersion)
-      const result = await postJson(url, headers, body, timeoutMs, transferPolicy)
+      const result = await postJson(url, headers, body, timeoutMs,
+        typeof options.onRawResponse === 'function'
+          ? { ...transferPolicy, onBlockedResponse: captureRaw }
+          : transferPolicy)
       status = result.status
       retryWait = result.retryAfterMs || 0
+
+      // 只在调用方显式启用调试时交出服务端原始响应正文；
+      // 重试和降档时每一次 HTTP 响应都分别交给调用方处理。
+      captureRaw(result)
 
       if (!result.ok) {
         // 仅当服务商明确拒绝 reasoning_effort 时降档，不把图片等参数错误误判成思考档位问题。

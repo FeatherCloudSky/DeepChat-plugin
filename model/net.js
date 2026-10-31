@@ -421,7 +421,8 @@ export async function request(rawUrl, options = {}) {
     maxBytes = 8 * 1024 * 1024,
     timeoutMs = 15000,
     headers = {},
-    body = null
+    body = null,
+    onBlockedResponse
   } = options
 
   let url
@@ -465,6 +466,10 @@ export async function request(rawUrl, options = {}) {
     const location = response.headers.location
     if (response.status >= 300 && response.status < 400 && location) {
       if (hop >= maxRedirects) {
+        // 可选观察钩子只交出已读完的响应，绝不改变禁止跟随跳转的行为。
+        if (typeof onBlockedResponse === 'function') {
+          try { onBlockedResponse(response) } catch { /* 观察失败不影响安全拒绝 */ }
+        }
         throw new BlockedTargetError(`目标返回了跳转（HTTP ${response.status}），出于安全没有跟随`)
       }
       let next

@@ -10,7 +10,9 @@
  *   "groups": { "1234567890:123456": true },
  *   "users":  { "1234567890:10001": false },
  *   "groupPrompts": { "1234567890:123456": "群用人设" },
- *   "userPrompts":  { "1234567890:10001": "私聊人设" }
+ *   "userPrompts":  { "1234567890:10001": "私聊人设" },
+ *   "groupDebug": { "1234567890:123456": true },
+ *   "userDebug":  { "1234567890:10001": true }
  * }
  * 键里的前缀是机器人自己的 QQ（self_id）：多机器人共用一个 Redis / 进程时，
  * 同一个群在 A 机器人上关掉、在 B 机器人上开着，是两个独立的事实，不能混。
@@ -23,13 +25,15 @@ import { writeJsonAtomic } from './storage.js'
 
 const STATE_FILE = path.join(pluginData, 'state.json')
 
-let state = { groups: {}, users: {}, groupPrompts: {}, userPrompts: {} }
+let state = { groups: {}, users: {}, groupPrompts: {}, userPrompts: {}, groupDebug: {}, userDebug: {} }
 
 const buckets = (parsed) => ({
   groups: parsed?.groups && typeof parsed.groups === 'object' ? parsed.groups : {},
   users: parsed?.users && typeof parsed.users === 'object' ? parsed.users : {},
   groupPrompts: parsed?.groupPrompts && typeof parsed.groupPrompts === 'object' ? parsed.groupPrompts : {},
-  userPrompts: parsed?.userPrompts && typeof parsed.userPrompts === 'object' ? parsed.userPrompts : {}
+  userPrompts: parsed?.userPrompts && typeof parsed.userPrompts === 'object' ? parsed.userPrompts : {},
+  groupDebug: parsed?.groupDebug && typeof parsed.groupDebug === 'object' ? parsed.groupDebug : {},
+  userDebug: parsed?.userDebug && typeof parsed.userDebug === 'object' ? parsed.userDebug : {}
 })
 
 function load() {
@@ -74,6 +78,10 @@ function bucket(e) {
 
 function promptBucket(e) {
   return e.isGroup ? state.groupPrompts : state.userPrompts
+}
+
+function debugBucket(e) {
+  return e.isGroup ? state.groupDebug : state.userDebug
 }
 
 /** 机器人身份：多机器人共用一个进程/Redis 时必须区分开 */
@@ -124,7 +132,20 @@ const ChatState = {
 
   /** 清空所有会话设置 */
   clearAll() {
-    return updateState(() => { state = { groups: {}, users: {}, groupPrompts: {}, userPrompts: {} } })
+    return updateState(() => { state = { groups: {}, users: {}, groupPrompts: {}, userPrompts: {}, groupDebug: {}, userDebug: {} } })
+  },
+
+  /** 调试仅对当前机器人及当前会话生效。没有记录时默认关闭。 */
+  isDebugEnabled(e) {
+    return debugBucket(e)[sessionKey(e)] === true
+  },
+
+  /** 返回保存是否成功；关闭时删除记录，确保重启后仍保持关闭。 */
+  setDebugEnabled(e, enabled) {
+    return updateState(() => {
+      if (enabled) debugBucket(e)[sessionKey(e)] = true
+      else delete debugBucket(e)[sessionKey(e)]
+    })
   },
 
   /**

@@ -138,6 +138,8 @@ export class manage extends plugin {
       // 必须比 chat.js 更早被检查，否则 ^#chat 会把 #chat开 当成聊天内容
       priority: -5000,
       rule: [
+        { reg: '^#chat调试激活$', fnc: 'enableDebug' },
+        { reg: '^#chat调试关$', fnc: 'disableDebug' },
         { reg: '^#chat开$', fnc: 'enable' },
         { reg: '^#chat关$', fnc: 'disable' },
         { reg: '^#chat重置$', fnc: 'reset' },
@@ -164,6 +166,18 @@ export class manage extends plugin {
 
   denyToggle(e) {
     return e.reply(`只有主人和管理员才能开关 AI 对话（你当前是${Permission.roleLabel(e)}）。`)
+  }
+
+  async enableDebug(e) {
+    if (!Permission.isAdmin(e)) return e.reply('只有主人和管理员才能开关调试模式。')
+    if (!ChatState.setDebugEnabled(e, true)) return e.reply('保存失败，请检查数据目录权限或磁盘空间。')
+    return e.reply(`已开启 ${this.sessionName(e)} 的调试模式。API 返回内容将在本会话的折叠聊天记录中完整展示${e.isGroup ? '，群成员均可查看' : ''}。发送 #chat调试关 可恢复正常回复。`)
+  }
+
+  async disableDebug(e) {
+    if (!Permission.isAdmin(e)) return e.reply('只有主人和管理员才能开关调试模式。')
+    if (!ChatState.setDebugEnabled(e, false)) return e.reply('保存失败，请检查数据目录权限或磁盘空间。')
+    return e.reply(`已关闭 ${this.sessionName(e)} 的调试模式，恢复正常回复。`)
   }
 
   async enable(e) {
@@ -289,6 +303,7 @@ export class manage extends plugin {
       `【${pluginName} 状态】`,
       `你的身份：${Permission.roleLabel(e)}`,
       `本会话：${enabled ? '已启用' : '已停用'}`,
+      `调试模式：${ChatState.isDebugEnabled(e) ? '已开启' : '已关闭'}`,
       `判定来源：${source}${override === null ? '' : '（会话单独设置）'}`,
       `协议：${info.provider}`,
       `模型：${info.model}`,

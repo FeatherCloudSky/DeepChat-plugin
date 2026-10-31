@@ -53,7 +53,10 @@ export async function postJson(url, headers, body, timeoutMs, policy = {}) {
     requireHttps: Boolean(policy.requireHttps),
     allowPrivate: Boolean(policy.allowPrivate),
     allowLoopback: Boolean(policy.allowLoopback),
-    allowHosts: policy.allowHosts || []
+    allowHosts: policy.allowHosts || [],
+    onBlockedResponse: typeof policy.onBlockedResponse === 'function'
+      ? response => policy.onBlockedResponse(toResult(response.status, response.buffer, response.headers['retry-after']))
+      : undefined
   })
   return toResult(result.status, result.buffer, result.headers['retry-after'])
 }

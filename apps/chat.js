@@ -14,6 +14,8 @@ import { readTrustedImage } from '../model/safepath.js'
 import { sniffImageType } from '../model/sniff.js'
 import { allowPerMinute, downloadConcurrency, withSlot, RateLimitError } from '../model/concurrency.js'
 import { redactUrl } from '../model/net.js'
+import ChatState from '../model/ChatState.js'
+import { sendDebugResponse } from '../model/DebugReply.js'
 
 const CACHE_PREFIX = `${pluginName}:chat:`
 
@@ -384,11 +386,13 @@ export default class DeepChat extends plugin {
         return false
       }
       const { messages, cacheKey } = await this.getContextWithHistory(e, content, interactionType, images)
-      if (interactionType === 'active' && Cfg.getBool('thinking', false)) {
+      const debugging = ChatState.isDebugEnabled(e)
+      if (!debugging && interactionType === 'active' && Cfg.getBool('thinking', false)) {
         replyWithRecall(e, e.reply('我正在思考如何回复你，请稍候', true), 30)
       }
 
       let failure = null
+      const rawResponses = []
       const request = {
         messages,
         model: Cfg.get('model', '') || undefined,
@@ -396,6 +400,7 @@ export default class DeepChat extends plugin {
         maxTokens: Cfg.get('maxTokens', 512),
         onError: (error) => { failure = error }
       }
+      if (debugging) request.onRawResponse = (response) => { rawResponses.push(response) }
 
       if (interactionType === 'pseudo') {
         request.temperature = Cfg.get('pseudoTemperature', 1.5)
@@ -403,6 +408,19 @@ export default class DeepChat extends plugin {
       }
 
       const rawAnswer = await Provider.chat(request)
+
+      // 处理中的请求返回前若已关闭调试，按最新状态恢复普通回复。
+      const showDebug = debugging && ChatState.isDebugEnabled(e)
+      if (showDebug && rawResponses.length > 0) {
+        const sent = await sendDebugResponse(e, rawResponses, failure)
+        const answer = rawAnswer ? escapeCqText(cleanAnswer(rawAnswer)) : ''
+        if (sent && answer) await this.saveToCache(e, cacheKey, messages, answer)
+        return sent
+      }
+
+      if (showDebug) {
+        return e.reply(`没有收到完整的 API 响应正文：${failure?.message || '请求未完成或响应超过限制。'}`)
+      }
 
       if (!rawAnswer) {
         if (interactionType === 'active') return e.reply(failure?.message || 'AI 响应失败，请稍后再试或检查插件配置。')
