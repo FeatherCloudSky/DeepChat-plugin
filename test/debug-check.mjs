@@ -14,16 +14,21 @@ const store = new Map()
 globalThis.redis = {
   get: async key => store.get(key) || null,
   set: async (key, value) => store.set(key, value),
-  del: async key => store.delete(key),
-  keys: async () => [...store.keys()]
+  del: async keys => { for (const key of Array.isArray(keys) ? keys : [keys]) store.delete(key) },
+  keys: async pattern => [...store.keys()].filter(key => key.startsWith(pattern.replace(/\*$/, '')))
 }
 const { default: Cfg } = await import('../model/Cfg.js')
 const { default: State } = await import('../model/ChatState.js')
 const { default: Provider } = await import('../model/Provider.js')
 const { manage: Manage } = await import('../apps/manage.js')
 const { default: Chat } = await import('../apps/chat.js')
+const { cleanAnswer } = await import('../model/Context.js')
 let checks = 0
 function check(name, actual, expected) { assert.deepEqual(actual, expected, name); checks++; console.log(`PASS ${name}`) }
+check('正常回复过滤完整思考块', cleanAnswer('前文<think>隐私\n推理</think>答案'), '前文答案')
+check('缺失起始标签时不泄露前文', cleanAnswer('思考内容</think>答案'), '答案')
+check('未闭合思考块不泄露', cleanAnswer('答案<think>思考'), '答案')
+check('大小写兼容', cleanAnswer('<THINK>内容</THINK>完成'), '完成')
 const queue = []
 let redirectTargetHits = 0
 const server = http.createServer((req, res) => {
@@ -102,6 +107,14 @@ try {
   await mgr.disableDebug(event)
   check('关闭后恢复正常模式', State.isDebugEnabled(event), false)
   const client = new Chat()
+  check('清除缓存命令匹配两个别名', ['#清除缓存', '#chat清除缓存'].every(s => client.rule.some(r => r.fnc === 'endAllConversations' && new RegExp(r.reg).test(s))), true)
+  const cacheA = client.getCacheKey(makeEvent(70))
+  const cacheB = client.getCacheKey(makeEvent(71))
+  store.set(cacheA, 'test-a'); store.set(cacheB, 'test-b'); store.set('other-plugin:key', 'keep')
+  await client.endAllConversations(makeEvent(70, false))
+  check('普通成员不能清除所有缓存', store.has(cacheA) && store.has(cacheB), true)
+  await client.endAllConversations(makeEvent(70))
+  check('主人清除所有会话且保留其他插件缓存', [store.has(cacheA), store.has(cacheB), store.get('other-plugin:key')], [false, false, 'keep'])
   const regular = makeEvent(10)
   queue.push({ status: 200, text: rawGood })
   await client.processChat(regular, '测试')

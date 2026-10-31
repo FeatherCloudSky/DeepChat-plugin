@@ -2,6 +2,7 @@ import Recorder from '../model/Recorder.js'
 import Permission from '../model/Permission.js'
 import Policy from '../model/Policy.js'
 import Cfg from '../model/Cfg.js'
+import { isSendFailed } from '../model/message.js'
 import { pluginName } from '../config/constant.js'
 
 const fmtTime = (t) => new Date(t).toLocaleString('zh-CN', { hour12: false })
@@ -74,9 +75,11 @@ async function sendMarkdownFile(e, meta, rows) {
   const filename = `${meta.label.replace(/[^\w\u4e00-\u9fa5-]/g, '_')}_聊天记录.md`
   try {
     if (e.isGroup) {
-      await target.sendFile(buffer, undefined, filename)   // (file, pid?, name?)
+      const result = await target.sendFile(buffer, undefined, filename)   // (file, pid?, name?)
+      if (isSendFailed(result)) return false
     } else {
-      await target.sendFile(buffer, filename)              // (file, filename?)
+      const result = await target.sendFile(buffer, filename)              // (file, filename?)
+      if (isSendFailed(result)) return false
     }
     return true
   } catch (error) {
@@ -155,26 +158,26 @@ export class record extends plugin {
   async stop(e) {
     if (!Policy.canUseRecord(e)) return this.deny(e)
 
-    const result = Recorder.stop(e)
+    const result = Recorder.beginExport(e)
     if (!result) return e.reply('当前会话没有在记录。发送 #记录 开始。')
 
     const { meta, rows } = result
     if (rows.length === 0) {
-      Recorder.removeFile(meta.key)
+      Recorder.finishExport(meta, true)
       return e.reply(
         `${meta.label} 这次一条消息都没记到。\n` +
         '常见原因：群里开启了「仅 @ 时响应」（onlyReplyAt 不是 0），普通消息到不了插件。'
       )
     }
 
+    try {
     const mode = String(Cfg.get('recordOutput', 'auto')).toLowerCase()
     let sent = false
 
     if (mode === 'auto' || mode === 'forward') {
       const forward = await buildForward(e, meta, rows)
       if (forward) {
-        await e.reply(forward)
-        sent = true
+        try { sent = !isSendFailed(await e.reply(forward)) } catch { sent = false }
       } else if (mode === 'forward') {
         await e.reply('合并转发在当前协议下不可用，改用文本发送。')
       }
@@ -190,13 +193,18 @@ export class record extends plugin {
     if (!sent) {
       const chunks = chunkText(buildPlainText(meta, rows))
       for (const chunk of chunks) {
-        await e.reply(chunk)
+        if (isSendFailed(await e.reply(chunk))) throw new Error('发送失败')
         await new Promise((resolve) => setTimeout(resolve, 300))
       }
     }
 
     // 发出去了才删文件；发送过程抛异常的话记录还留着，可以再发一次
-    Recorder.removeFile(meta.key)
+    Recorder.finishExport(meta, true)
     return true
+    } catch (error) {
+      Recorder.finishExport(meta, false)
+      logger.warn(`[${pluginName}] 发送聊天记录失败，记录已保留`)
+      return e.reply('发送聊天记录失败，记录已保留，请稍后再次发送 #结束记录。')
+    }
   }
 }

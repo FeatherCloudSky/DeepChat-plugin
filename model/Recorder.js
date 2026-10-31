@@ -199,7 +199,7 @@ const Recorder = {
   /** 开始记录；已经记着了返回 null */
   start(e) {
     const key = sessionKey(e)
-    if (active.has(key)) return null
+    if (Recorder.get(e)) return null
     ensureDir()
     try {
       fs.writeFileSync(fileFor(key), '', { encoding: 'utf8', mode: 0o600 })
@@ -231,6 +231,24 @@ const Recorder = {
     return { meta, rows: readRecords(meta.key) }
   },
 
+  /** 导出期间保留记录，避免发送失败时无法重试。 */
+  beginExport(e) {
+    const meta = Recorder.get(e)
+    if (!meta || meta.exporting) return null
+    meta.exporting = true
+    return { meta, rows: readRecords(meta.key) }
+  },
+
+  finishExport(meta, success) {
+    if (active.get(meta.key) !== meta) return
+    if (success) {
+      active.delete(meta.key)
+      unlinkQuiet(meta.key)
+    } else {
+      delete meta.exporting
+    }
+  },
+
   /** 丢弃记录 */
   cancel(e) {
     const meta = Recorder.get(e)
@@ -251,6 +269,7 @@ const Recorder = {
   capture(e) {
     const meta = Recorder.get(e)
     if (!meta) return false
+    if (meta.exporting) return false
 
     if (meta.expiresAt && Date.now() >= meta.expiresAt) {
       active.delete(meta.key)

@@ -212,7 +212,8 @@ export default class DeepChat extends plugin {
         // 只匹配「#chat」后面确实跟了内容的情况，裸 #chat 走帮助提示
         { reg: '^#chat(\\s|$)', fnc: 'chatCommand' },
         { reg: '^#结束对话$', fnc: 'endConversation' },
-        { reg: '^#结束全部对话$', fnc: 'endAllConversations' }
+        { reg: '^#结束全部对话$', fnc: 'endAllConversations' },
+        { reg: '^#(?:chat)?清除缓存$', fnc: 'endAllConversations' }
       ]
     })
     this.redisKeyPrefix = CACHE_PREFIX
